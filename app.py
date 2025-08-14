@@ -222,6 +222,7 @@ st.markdown(f"## {APP_TITLE}  ✨")
 st.markdown("A polished demo: register faces, train LBPH, and run live or snapshot recognition. Works on Streamlit Cloud (use snapshot fallback if WebRTC stalls).")
 
 # ---------- Sidebar controls ----------
+# ---------- Sidebar controls ----------
 with st.sidebar:
     st.header("Controls")
     conf_threshold = st.slider("Recognition threshold (lower=stricter)", 1, 150, 60, 1)
@@ -233,15 +234,30 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("Dataset")
     if st.button("Clear All Data"):
-        if st.confirm("Delete all enrolled images and models? This cannot be undone."):
+        if "confirm_clear" not in st.session_state:
+            st.session_state["confirm_clear"] = False
+        if not st.session_state["confirm_clear"]:
+            st.warning("Are you sure you want to delete all enrolled images and models? This cannot be undone.")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Yes, Delete"):
+                    st.session_state["confirm_clear"] = True
+            with col2:
+                if st.button("Cancel"):
+                    st.session_state["confirm_clear"] = False
+                    st.experimental_rerun()
+        else:
             try:
                 shutil.rmtree(DATA_DIR)
                 shutil.rmtree(MODELS_DIR)
-            except Exception:
-                pass
-            DATA_DIR.mkdir(exist_ok=True)
-            MODELS_DIR.mkdir(exist_ok=True)
-            st.success("All data cleared. Reload the app.")
+                DATA_DIR.mkdir(exist_ok=True)
+                MODELS_DIR.mkdir(exist_ok=True)
+                st.success("All data cleared. Reload the app.")
+                st.session_state["confirm_clear"] = False
+                st.experimental_rerun()
+            except Exception as e:
+                st.error(f"Failed to clear data: {e}")
+                st.session_state["confirm_clear"] = False
     persons = list_persons()
     if persons:
         sel_person = st.selectbox("Manage person", [""] + persons)
@@ -249,6 +265,7 @@ with st.sidebar:
             if st.button("Delete person dataset"):
                 shutil.rmtree(DATA_DIR / sel_person)
                 st.success(f"Deleted {sel_person}.")
+                st.experimental_rerun()  # Refresh to update the selectbox
     st.markdown("---")
     st.subheader("Export")
     if MODEL_PATH.exists():
@@ -265,9 +282,6 @@ with st.sidebar:
             st.download_button("Download CSV", csv, file_name="recognitions.csv", mime="text/csv")
         else:
             st.info("No history yet.")
-
-# ---------- Main layout: Tabs ----------
-tabs = st.tabs(["Register ▶", "Train ▶", "Live ▶", "History & Stats ▶"])
 
 # ---------- Register tab ----------
 with tabs[0]:
