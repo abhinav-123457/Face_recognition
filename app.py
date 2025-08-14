@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
-from concurrent.futures import ThreadPoolExecutor  # For potential parallel processing
+from concurrent.futures import ThreadPoolExecutor
 
 APP_TITLE = "Live Face Recognition (Streamlit + WebRTC, OpenCV LBPH)"
 DATA_DIR = Path("data")
@@ -22,12 +22,12 @@ FACE_CASCADE = cv2.CascadeClassifier(CASCADE_PATH)
 MODEL_PATH = MODELS_DIR / "lbph_model.xml"
 LABELS_PATH = MODELS_DIR / "labels.json"
 
-# Optimized LBPH parameters for better accuracy and speed
+# Optimized LBPH parameters
 LBPH_RADIUS = 1
 LBPH_NEIGHBORS = 6
 LBPH_GRID_X = 6
 LBPH_GRID_Y = 6
-FACE_RESIZE = (200, 200)  # Standard size for LBPH
+FACE_RESIZE = (200, 200)
 
 def load_labels() -> Dict[int, str]:
     if LABELS_PATH.exists():
@@ -47,13 +47,31 @@ def collect_dataset_stats() -> Dict[str, int]:
             stats[person_dir.name] = len(list(person_dir.glob("*.jpg"))) + len(list(person_dir.glob("*.png")))
     return stats
 
+def process_image(img_path: Path, label: int) -> List[Tuple[np.ndarray, int]]:
+    """Process a single image with augmentation."""
+    img = cv2.imdecode(np.fromfile(str(img_path), dtype=np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return []
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=6, minSize=(60, 60))
+    if len(faces) == 0:
+        return []
+    x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
+    roi = gray[y : y + h, x : x + w]
+    try:
+        roi = cv2.resize(roi, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
+        roi = cv2.equalizeHist(roi)
+        roi_flipped = cv2.flip(roi, 1)
+        return [(roi, label), (roi_flipped, label)]
+    except Exception:
+        return []
+
 def prepare_training_data() -> Tuple[List[np.ndarray], List[int], Dict[int, str]]:
     images = []
     labels = []
     label_map: Dict[int, str] = {}
     next_label = 0
 
-    # Use ThreadPoolExecutor for parallel image loading if dataset is large
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
         futures = []
         for person_dir in sorted(DATA_DIR.glob("*")):
@@ -70,9 +88,8 @@ def prepare_training_data() -> Tuple[List[np.ndarray], List[int], Dict[int, str]
             next_label += 1
 
         for future in futures:
-            result = future.result()
-            if result:
-                img_roi, label = result
+            results = future.result()
+            for img_roi, label in results:
                 images.append(img_roi)
                 labels.append(label)
 
@@ -80,25 +97,6 @@ def prepare_training_data() -> Tuple[List[np.ndarray], List[int], Dict[int, str]
         raise RuntimeError("Not enough data to train. Please add images for at least one person.")
 
     return images, labels, label_map
-
-def process_image(img_path: Path, label: int) -> Tuple[np.ndarray, int] | None:
-    """Process a single image in a thread-safe manner."""
-    img = cv2.imdecode(np.fromfile(str(img_path), dtype=np.uint8), cv2.IMREAD_COLOR)
-    if img is None:
-        return None
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
-    if len(faces) == 0:
-        return None  # Skip if no face detected
-    # Take the largest face
-    x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
-    roi = gray[y : y + h, x : x + w]
-    try:
-        roi = cv2.resize(roi, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
-        roi = cv2.equalizeHist(roi)  # Histogram equalization for better contrast
-    except Exception:
-        return None
-    return roi, label
 
 def train_and_save_model() -> Tuple[int, Dict[str, int]]:
     images, labels, label_map = prepare_training_data()
@@ -127,7 +125,6 @@ def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
 
 def sanitize_name(name: str) -> str:
-    """Sanitize person name for filesystem safety."""
     return "".join(c for c in name.strip().replace(" ", "_") if c.isalnum() or c in ["_", "-"])
 
 # ---------- Streamlit UI ----------
@@ -137,10 +134,10 @@ st.caption("No Pi? No problem. Enroll faces, train LBPH, and run LIVE recognitio
 
 with st.sidebar:
     st.header("Controls")
-    conf_threshold = st.slider("Recognition threshold (LBPH, lower=more strict)", min_value=1, max_value=150, value=60, step=1)
-    min_face_size = st.slider("Min face size (px)", 40, 200, 80, 10)
-    scale_factor = st.slider("Detection scale factor (lower=more sensitive)", 1.05, 1.5, 1.1, 0.05)
-    min_neighbors = st.slider("Min neighbors for detection", 3, 10, 5, 1)
+    conf_threshold = st.slider("Recognition threshold (LBPH, lower=more strict)", min_value=1, max_value=100, value=50, step=1)
+    min_face_size = st.slider("Min face size (px)", 60, 200, 100, 10)
+    scale_factor = st.slider("Detection scale factor (lower=more sensitive)", 1.05, 1.5, 1.2, 0.05)
+    min_neighbors = st.slider("Min neighbors for detection", 3, 10, 6, 1)
     st.markdown("---")
     st.subheader("Project Folders")
     st.code(f"DATA_DIR: {DATA_DIR.resolve()}\nMODELS_DIR: {MODELS_DIR.resolve()}", language="bash")
@@ -165,7 +162,7 @@ with tabs[0]:
             img_array = np.frombuffer(img_bytes, dtype=np.uint8)
             img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+            faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=6, minSize=(60, 60))
             if len(faces) == 0:
                 st.warning("No face detected in the capture. Try again.")
             else:
@@ -174,7 +171,7 @@ with tabs[0]:
                 if ok:
                     buf.tofile(str(file_path))
                     st.success(f"Saved capture for {person_name} → {file_path.name}")
-                    st.image(img_bytes, caption="Captured Image (Face Detected)", use_column_width=True)
+                    st.image(img_bytes, caption="Captured Image (Face Detected)", use_container_width=True)
         elif cam_img and not sanitized_name:
             st.warning("Please enter a valid person name before capturing.")
 
@@ -192,7 +189,7 @@ with tabs[0]:
                 if img is None:
                     continue
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+                faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=6, minSize=(60, 60))
                 if len(faces) == 0:
                     st.warning(f"No face detected in {up.name}. Skipping.")
                     continue
@@ -205,7 +202,7 @@ with tabs[0]:
             if saved > 0:
                 st.success(f"Saved {saved} image(s) for {person_name}.")
                 for prev in previews:
-                    st.image(prev, caption="Uploaded Image (Face Detected)", use_column_width=True)
+                    st.image(prev, caption="Uploaded Image (Face Detected)", use_container_width=True)
 
     st.markdown("### Current dataset")
     stats = collect_dataset_stats()
@@ -214,7 +211,6 @@ with tabs[0]:
     else:
         st.info("No images yet. Add some captures for at least one person.")
 
-    # Add option to delete a person/dataset
     if stats:
         delete_person = st.selectbox("Delete a person's dataset", [""] + list(stats.keys()))
         if delete_person and st.button("Confirm Delete"):
@@ -236,7 +232,6 @@ with tabs[1]:
             except Exception as e:
                 st.error(str(e))
 
-    # Show existing labels if any
     if LABELS_PATH.exists():
         st.markdown("#### Current labels")
         st.json(load_labels())
@@ -257,8 +252,8 @@ with tabs[2]:
                 self.recognizer = recognizer
                 self.labels = id_to_name
                 self.frame_count = 0
-                self.last_faces = []  # Cache detected faces
-                self.skip_frames = 2  # Process face detection every 2 frames
+                self.last_faces = []
+                self.skip_frames = 2
 
             def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
                 img = frame.to_ndarray(format="bgr24")
@@ -270,21 +265,22 @@ with tabs[2]:
                         gray,
                         scaleFactor=st.session_state.get("scale_factor", 1.2),
                         minNeighbors=st.session_state.get("min_neighbors", 6),
-                        minSize=(st.session_state.get("min_face_size", 80), st.session_state.get("min_face_size", 80)),
+                        minSize=(st.session_state.get("min_face_size", 100), st.session_state.get("min_face_size", 100)),
                     )
-                    self.last_faces = faces  # Cache detected faces
+                    self.last_faces = faces
                 else:
-                    faces = self.last_faces  # Use cached faces
+                    faces = self.last_faces
 
+                st.write(f"Frame resolution: {img.shape[1]}x{img.shape[0]}, Detected faces: {len(faces)}")
                 for (x, y, w, h) in faces:
                     roi = gray[y : y + h, x : x + w]
                     try:
                         roi = cv2.resize(roi, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
-                        roi = cv2.equalizeHist(roi)  # Histogram equalization for better contrast
+                        roi = cv2.equalizeHist(roi)
                     except Exception:
                         continue
                     label_id, confidence = self.recognizer.predict(roi)
-                    if confidence <= st.session_state.get("conf_threshold", 60):
+                    if confidence <= st.session_state.get("conf_threshold", 50):
                         name = self.labels.get(label_id, "Unknown")
                         color = (0, 255, 0)
                         caption = f"{name} ({confidence:.1f})"
@@ -293,12 +289,12 @@ with tabs[2]:
                         color = (0, 0, 255)
                         caption = f"{name} ({confidence:.1f})"
 
+                    st.write(f"Face size: {w}x{h}, Confidence: {confidence:.1f}, Predicted: {name}")
                     cv2.rectangle(img, (x, y), (x + w, y + h), color, 2)
                     draw_label(img, caption, x, y)
 
                 return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-        # Store sidebar values in session_state only if changed
         if "conf_threshold" not in st.session_state or st.session_state["conf_threshold"] != conf_threshold:
             st.session_state["conf_threshold"] = conf_threshold
         if "min_face_size" not in st.session_state or st.session_state["min_face_size"] != min_face_size:
@@ -321,12 +317,12 @@ with tabs[2]:
                 "video": {
                     "width": {"ideal": 1280},
                     "height": {"ideal": 720},
-                    "frameRate": {"ideal": 60}
+                    "frameRate": {"ideal": 15}
                 },
                 "audio": False
             },
-            async_processing=True,  # Enable async for smoother performance
+            async_processing=True,
         )
 
 st.markdown("---")
-st.caption("Tip: Capture at least 5–10 varied images per person (different lighting/angles) before training. Optimized with histogram equalization and parallel loading.")
+st.caption("Tip: Capture at least 10–20 varied images per person (different lighting/angles/expressions) before training. Optimized with histogram equalization, augmentation, and parallel loading.")
