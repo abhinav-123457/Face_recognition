@@ -53,14 +53,14 @@ def process_image(img_path: Path, label: int) -> List[Tuple[np.ndarray, int]]:
     if img is None:
         return []
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=6, minSize=(60, 60))
+    gray = cv2.equalizeHist(gray)  # Apply histogram equalization before detection
+    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(50, 50))
     if len(faces) == 0:
         return []
     x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
     roi = gray[y : y + h, x : x + w]
     try:
         roi = cv2.resize(roi, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
-        roi = cv2.equalizeHist(roi)
         roi_flipped = cv2.flip(roi, 1)
         return [(roi, label), (roi_flipped, label)]
     except Exception:
@@ -150,6 +150,7 @@ with tabs[0]:
     person_name = st.text_input("Person name", placeholder="e.g., Abhinav")
     sanitized_name = sanitize_name(person_name) if person_name else ""
     st.write("Capture from your webcam (recommended) or upload existing images. Auto-detects faces for quality.")
+    st.info("Tips for better detection: Ensure good lighting, face the camera directly, and keep your face centered and close.")
 
     col1, col2 = st.columns(2)
 
@@ -161,17 +162,25 @@ with tabs[0]:
             img_bytes = cam_img.getvalue()
             img_array = np.frombuffer(img_bytes, dtype=np.uint8)
             img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=6, minSize=(60, 60))
-            if len(faces) == 0:
-                st.warning("No face detected in the capture. Try again.")
+            if img is None:
+                st.error("Failed to decode image. Try again.")
             else:
-                file_path = person_dir / f"{uuid.uuid4().hex}.jpg"
-                ok, buf = cv2.imencode(".jpg", img)
-                if ok:
-                    buf.tofile(str(file_path))
-                    st.success(f"Saved capture for {person_name} → {file_path.name}")
-                    st.image(img_bytes, caption="Captured Image (Face Detected)", use_container_width=True)
+                # Resize image to ensure consistent resolution
+                target_resolution = (1280, 720)
+                img = cv2.resize(img, target_resolution, interpolation=cv2.INTER_LINEAR)
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                gray = cv2.equalizeHist(gray)  # Preprocess with histogram equalization
+                faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(50, 50))
+                st.write(f"Debug: Image resolution: {img.shape[1]}x{img.shape[0]}, Faces detected: {len(faces)}")
+                if len(faces) == 0:
+                    st.warning("No face detected in the capture. Try again with better lighting or closer to the camera.")
+                else:
+                    file_path = person_dir / f"{uuid.uuid4().hex}.jpg"
+                    ok, buf = cv2.imencode(".jpg", img)
+                    if ok:
+                        buf.tofile(str(file_path))
+                        st.success(f"Saved capture for {person_name} → {file_path.name}")
+                        st.image(img_bytes, caption="Captured Image (Face Detected)", use_container_width=True)
         elif cam_img and not sanitized_name:
             st.warning("Please enter a valid person name before capturing.")
 
@@ -187,9 +196,13 @@ with tabs[0]:
                 img_array = np.frombuffer(img_bytes, dtype=np.uint8)
                 img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
                 if img is None:
+                    st.warning(f"Failed to decode {up.name}. Skipping.")
                     continue
+                img = cv2.resize(img, (1280, 720), interpolation=cv2.INTER_LINEAR)
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.2, minNeighbors=6, minSize=(60, 60))
+                gray = cv2.equalizeHist(gray)
+                faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(50, 50))
+                st.write(f"Debug: {up.name} resolution: {img.shape[1]}x{img.shape[0]}, Faces detected: {len(faces)}")
                 if len(faces) == 0:
                     st.warning(f"No face detected in {up.name}. Skipping.")
                     continue
