@@ -8,11 +8,8 @@ import cv2
 import numpy as np
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
-from concurrent.futures import ThreadPoolExecutor
-import threading
-import pandas as pd
-import base64  # For downloading files
-import shutil  # For zipping and deleting
+from concurrent.futures import ThreadPoolExecutor  # For potential parallel processing
+import threading  # For thread-safe operations if needed
 
 APP_TITLE = "Live Face Recognition (Streamlit + WebRTC, OpenCV LBPH)"
 DATA_DIR = Path("data")
@@ -26,12 +23,12 @@ FACE_CASCADE = cv2.CascadeClassifier(CASCADE_PATH)
 MODEL_PATH = MODELS_DIR / "lbph_model.xml"
 LABELS_PATH = MODELS_DIR / "labels.json"
 
-# Optimized LBPH parameters
+# Optimized LBPH parameters for better accuracy and speed
 LBPH_RADIUS = 1
 LBPH_NEIGHBORS = 8
 LBPH_GRID_X = 8
 LBPH_GRID_Y = 8
-FACE_RESIZE = (200, 200)
+FACE_RESIZE = (200, 200)  # Standard size for LBPH
 
 def load_labels() -> Dict[int, str]:
     if LABELS_PATH.exists():
@@ -57,6 +54,7 @@ def prepare_training_data() -> Tuple[List[np.ndarray], List[int], Dict[int, str]
     label_map: Dict[int, str] = {}
     next_label = 0
 
+    # Use ThreadPoolExecutor for parallel image loading if dataset is large
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
         futures = []
         for person_dir in sorted(DATA_DIR.glob("*")):
@@ -85,18 +83,20 @@ def prepare_training_data() -> Tuple[List[np.ndarray], List[int], Dict[int, str]
     return images, labels, label_map
 
 def process_image(img_path: Path, label: int) -> Tuple[np.ndarray, int] | None:
+    """Process a single image in a thread-safe manner."""
     img = cv2.imdecode(np.fromfile(str(img_path), dtype=np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         return None
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
     if len(faces) == 0:
-        return None
+        return None  # Skip if no face detected
+    # Take the largest face
     x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
     roi = gray[y : y + h, x : x + w]
     try:
         roi = cv2.resize(roi, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
-        roi = cv2.equalizeHist(roi)
+        roi = cv2.equalizeHist(roi)  # Histogram equalization for better contrast
     except Exception:
         return None
     return roi, label
@@ -128,65 +128,25 @@ def ensure_dir(path: Path):
     path.mkdir(parents=True, exist_ok=True)
 
 def sanitize_name(name: str) -> str:
+    """Sanitize person name for filesystem safety."""
     return "".join(c for c in name.strip().replace(" ", "_") if c.isalnum() or c in ["_", "-"])
-
-def get_image_paths(person_dir: Path) -> List[Path]:
-    return sorted([p for p in person_dir.glob("*") if p.suffix.lower() in [".jpg", ".png"]])
-
-# Custom CSS for beauty
-CUSTOM_CSS = """
-<style>
-    .stApp {
-        background-color: #f0f2f6;
-    }
-    .stButton > button {
-        background-color: #4CAF50;
-        color: white;
-    }
-    .stButton > button:hover {
-        background-color: #45a049;
-    }
-    .stSlider > div > div > div {
-        background-color: #2196F3;
-    }
-    section[data-testid="stSidebar"] {
-        background-color: #e3f2fd;
-    }
-    .block-container {
-        padding: 1rem;
-        border-radius: 10px;
-        box-shadow: 0 4px 8px rgba(0,0,0,0.1);
-    }
-</style>
-"""
 
 # ---------- Streamlit UI ----------
 st.set_page_config(page_title=APP_TITLE, page_icon="🎥", layout="wide")
-st.markdown(CUSTOM_CSS, unsafe_allow_html=True)
 st.title(APP_TITLE)
-st.caption("No Pi? No problem. Enroll faces, train LBPH, and run LIVE recognition in your browser. Optimized and enhanced with more features.")
+st.caption("No Pi? No problem. Enroll faces, train LBPH, and run LIVE recognition in your browser. Optimized for speed and accuracy.")
 
 with st.sidebar:
     st.header("Controls")
-    conf_threshold = st.slider("Recognition threshold (LBPH, lower=more strict)", min_value=1, max_value=150, value=60, step=1, help="Lower values require stricter matches.")
-    min_face_size = st.slider("Min face size (px)", 40, 200, 80, 10, help="Smaller values detect smaller faces but may increase false positives.")
-    scale_factor = st.slider("Detection scale factor (lower=more sensitive)", 1.05, 1.5, 1.1, 0.05, help="Controls detection sensitivity.")
-    min_neighbors = st.slider("Min neighbors for detection", 3, 10, 5, 1, help="Higher values reduce false positives.")
+    conf_threshold = st.slider("Recognition threshold (LBPH, lower=more strict)", min_value=1, max_value=150, value=60, step=1)
+    min_face_size = st.slider("Min face size (px)", 40, 200, 80, 10)
+    scale_factor = st.slider("Detection scale factor (lower=more sensitive)", 1.05, 1.5, 1.1, 0.05)
+    min_neighbors = st.slider("Min neighbors for detection", 3, 10, 5, 1)
     st.markdown("---")
     st.subheader("Project Folders")
     st.code(f"DATA_DIR: {DATA_DIR.resolve()}\nMODELS_DIR: {MODELS_DIR.resolve()}", language="bash")
-    st.markdown("---")
-    st.subheader("Export Dataset")
-    if st.button("Download Dataset as ZIP"):
-        zip_path = shutil.make_archive("dataset", 'zip', DATA_DIR)
-        with open(zip_path, "rb") as f:
-            bytes_data = f.read()
-            b64 = base64.b64encode(bytes_data).decode()
-            href = f'<a href="data:file/zip;base64,{b64}" download="dataset.zip">Download ZIP</a>'
-            st.markdown(href, unsafe_allow_html=True)
-        os.remove(zip_path)
 
-tabs = st.tabs(["📇 Enroll", "🧠 Train", "🔴 Live Recognition", "📊 Stats"])
+tabs = st.tabs(["📇 Enroll", "🧠 Train", "🔴 Live Recognition"])
 
 # --------- ENROLL TAB ---------
 with tabs[0]:
@@ -255,27 +215,11 @@ with tabs[0]:
     else:
         st.info("No images yet. Add some captures for at least one person.")
 
-    # Enhanced: Preview and delete images per person
-    if stats:
-        st.markdown("### Dataset Preview and Management")
-        for person in stats.keys():
-            with st.expander(f"{person} ({stats[person]} images)"):
-                person_dir = DATA_DIR / person
-                image_paths = get_image_paths(person_dir)
-                cols = st.columns(4)  # Grid of 4 columns
-                for i, img_path in enumerate(image_paths):
-                    with cols[i % 4]:
-                        img = cv2.imdecode(np.fromfile(str(img_path), dtype=np.uint8), cv2.IMREAD_COLOR)
-                        st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), use_column_width=True)
-                        if st.button("Delete", key=f"del_{person}_{img_path.name}"):
-                            os.remove(img_path)
-                            st.success(f"Deleted {img_path.name}")
-                            st.rerun()
-
-    # Delete entire person
+    # Add option to delete a person/dataset
     if stats:
         delete_person = st.selectbox("Delete a person's dataset", [""] + list(stats.keys()))
-        if delete_person and st.button("Confirm Delete", type="primary"):
+        if delete_person and st.button("Confirm Delete"):
+            import shutil
             shutil.rmtree(DATA_DIR / delete_person)
             st.success(f"Deleted dataset for {delete_person}.")
             st.rerun()
@@ -284,8 +228,7 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("Train LBPH model")
     st.write("After enrolling images, click **Train** to build/update the model. Uses parallel processing for faster training.")
-    auto_train = st.checkbox("Auto-retrain after enrollment changes", value=False)
-    if st.button("Train / Retrain", type="primary"):
+    if st.button("Train / Retrain"):
         with st.spinner("Training model..."):
             try:
                 n_classes, stats = train_and_save_model()
@@ -294,17 +237,10 @@ with tabs[1]:
             except Exception as e:
                 st.error(str(e))
 
+    # Show existing labels if any
     if LABELS_PATH.exists():
         st.markdown("#### Current labels")
         st.json(load_labels())
-
-    # Download model
-    if MODEL_PATH.exists():
-        st.markdown("#### Export Model")
-        with open(MODEL_PATH, "rb") as f:
-            st.download_button("Download LBPH Model", f, file_name="lbph_model.xml")
-        with open(LABELS_PATH, "rb") as f:
-            st.download_button("Download Labels", f, file_name="labels.json")
 
 # --------- LIVE RECOGNITION TAB ---------
 with tabs[2]:
@@ -321,12 +257,12 @@ with tabs[2]:
             def __init__(self):
                 self.recognizer = recognizer
                 self.labels = id_to_name
-                self.lock = threading.Lock()
+                self.lock = threading.Lock()  # For thread safety if needed
 
             def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
                 img = frame.to_ndarray(format="bgr24")
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                gray = cv2.equalizeHist(gray)
+                gray = cv2.equalizeHist(gray)  # Improve contrast for detection
                 faces = FACE_CASCADE.detectMultiScale(
                     gray,
                     scaleFactor=st.session_state.get("scale_factor", 1.1),
@@ -355,6 +291,7 @@ with tabs[2]:
 
                 return av.VideoFrame.from_ndarray(img, format="bgr24")
 
+        # Store sidebar values in session_state
         st.session_state["conf_threshold"] = conf_threshold
         st.session_state["min_face_size"] = min_face_size
         st.session_state["scale_factor"] = scale_factor
@@ -370,30 +307,8 @@ with tabs[2]:
             video_processor_factory=VideoProcessor,
             rtc_configuration=rtc_config,
             media_stream_constraints={"video": True, "audio": False},
-            async_processing=True,
+            async_processing=True,  # Enable async for smoother performance
         )
 
-        # New feature: Display detected names list
-        st.markdown("#### Detected Faces")
-        detected_placeholder = st.empty()  # Placeholder for dynamic updates, but since no real-time data, optional
-
-# --------- STATS TAB ---------
-with tabs[3]:
-    st.subheader("Dataset Statistics")
-    stats = collect_dataset_stats()
-    if stats:
-        df = pd.DataFrame(list(stats.items()), columns=["Person", "Images"])
-        st.bar_chart(df.set_index("Person"))
-        st.dataframe(df.style.background_gradient(cmap="viridis"))
-    else:
-        st.info("No dataset yet.")
-
-    # Training stats if model exists
-    if MODEL_PATH.exists():
-        st.markdown("#### Model Info")
-        labels = load_labels()
-        st.write(f"Number of Classes: {len(labels)}")
-        st.json(labels)
-
 st.markdown("---")
-st.caption("Tip: Capture at least 5–10 varied images per person (different lighting/angles) before training. Now with previews, deletions, exports, and stats!")
+st.caption("Tip: Capture at least 5–10 varied images per person (different lighting/angles) before training. Optimized with histogram equalization and parallel loading.")
