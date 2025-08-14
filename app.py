@@ -9,7 +9,6 @@ import numpy as np
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 from concurrent.futures import ThreadPoolExecutor  # For potential parallel processing
-import threading  # For thread-safe operations if needed
 
 APP_TITLE = "Live Face Recognition (Streamlit + WebRTC, OpenCV LBPH)"
 DATA_DIR = Path("data")
@@ -25,9 +24,9 @@ LABELS_PATH = MODELS_DIR / "labels.json"
 
 # Optimized LBPH parameters for better accuracy and speed
 LBPH_RADIUS = 1
-LBPH_NEIGHBORS = 8
-LBPH_GRID_X = 8
-LBPH_GRID_Y = 8
+LBPH_NEIGHBORS = 6
+LBPH_GRID_X = 6
+LBPH_GRID_Y = 6
 FACE_RESIZE = (200, 200)  # Standard size for LBPH
 
 def load_labels() -> Dict[int, str]:
@@ -257,26 +256,34 @@ with tabs[2]:
             def __init__(self):
                 self.recognizer = recognizer
                 self.labels = id_to_name
-                self.lock = threading.Lock()  # For thread safety if needed
+                self.frame_count = 0
+                self.last_faces = []  # Cache detected faces
+                self.skip_frames = 2  # Process face detection every 2 frames
 
             def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
                 img = frame.to_ndarray(format="bgr24")
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                gray = cv2.equalizeHist(gray)  # Improve contrast for detection
-                faces = FACE_CASCADE.detectMultiScale(
-                    gray,
-                    scaleFactor=st.session_state.get("scale_factor", 1.1),
-                    minNeighbors=st.session_state.get("min_neighbors", 5),
-                    minSize=(st.session_state.get("min_face_size", 80), st.session_state.get("min_face_size", 80)),
-                )
+
+                self.frame_count += 1
+                if self.frame_count % self.skip_frames == 0:
+                    faces = FACE_CASCADE.detectMultiScale(
+                        gray,
+                        scaleFactor=st.session_state.get("scale_factor", 1.2),
+                        minNeighbors=st.session_state.get("min_neighbors", 6),
+                        minSize=(st.session_state.get("min_face_size", 80), st.session_state.get("min_face_size", 80)),
+                    )
+                    self.last_faces = faces  # Cache detected faces
+                else:
+                    faces = self.last_faces  # Use cached faces
+
                 for (x, y, w, h) in faces:
                     roi = gray[y : y + h, x : x + w]
                     try:
                         roi = cv2.resize(roi, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
+                        roi = cv2.equalizeHist(roi)  # Histogram equalization for better contrast
                     except Exception:
                         continue
-                    with self.lock:
-                        label_id, confidence = self.recognizer.predict(roi)
+                    label_id, confidence = self.recognizer.predict(roi)
                     if confidence <= st.session_state.get("conf_threshold", 60):
                         name = self.labels.get(label_id, "Unknown")
                         color = (0, 255, 0)
@@ -291,11 +298,15 @@ with tabs[2]:
 
                 return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-        # Store sidebar values in session_state
-        st.session_state["conf_threshold"] = conf_threshold
-        st.session_state["min_face_size"] = min_face_size
-        st.session_state["scale_factor"] = scale_factor
-        st.session_state["min_neighbors"] = min_neighbors
+        # Store sidebar values in session_state only if changed
+        if "conf_threshold" not in st.session_state or st.session_state["conf_threshold"] != conf_threshold:
+            st.session_state["conf_threshold"] = conf_threshold
+        if "min_face_size" not in st.session_state or st.session_state["min_face_size"] != min_face_size:
+            st.session_state["min_face_size"] = min_face_size
+        if "scale_factor" not in st.session_state or st.session_state["scale_factor"] != scale_factor:
+            st.session_state["scale_factor"] = scale_factor
+        if "min_neighbors" not in st.session_state or st.session_state["min_neighbors"] != min_neighbors:
+            st.session_state["min_neighbors"] = min_neighbors
 
         rtc_config = RTCConfiguration(
             {"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}
@@ -306,7 +317,14 @@ with tabs[2]:
             mode=WebRtcMode.SENDRECV,
             video_processor_factory=VideoProcessor,
             rtc_configuration=rtc_config,
-            media_stream_constraints={"video": True, "audio": False},
+            media_stream_constraints={
+                "video": {
+                    "width": {"ideal": 1280},
+                    "height": {"ideal": 720},
+                    "frameRate": {"ideal": 15}
+                },
+                "audio": False
+            },
             async_processing=True,  # Enable async for smoother performance
         )
 
