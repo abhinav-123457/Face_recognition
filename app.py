@@ -233,7 +233,7 @@ with st.sidebar:
     st.markdown("---")
     st.subheader("Dataset")
     if st.button("Clear All Data"):
-        if st.confirm("Delete all enrolled images and models? This cannot be undone."):
+        if st.button("Delete all enrolled images and models? This cannot be undone."):
             try:
                 shutil.rmtree(DATA_DIR)
                 shutil.rmtree(MODELS_DIR)
