@@ -321,7 +321,7 @@ with tabs[2]:
                 "video": {
                     "width": {"ideal": 1280},
                     "height": {"ideal": 720},
-                    "frameRate": {"ideal": 15}
+                    "frameRate": {"ideal": 60}
                 },
                 "audio": False
             },
