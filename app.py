@@ -27,8 +27,8 @@ MODEL_PATH = MODELS_DIR / "lbph_model.xml"
 LABELS_PATH = MODELS_DIR / "labels.json"
 
 # Optimized LBPH parameters for glasses
-LBPH_RADIUS = 2  # Increased to capture more texture
-LBPH_NEIGHBORS = 10  # Increased for robustness
+LBPH_RADIUS = 2
+LBPH_NEIGHBORS = 10
 LBPH_GRID_X = 8
 LBPH_GRID_Y = 8
 FACE_RESIZE = (200, 200)
@@ -73,8 +73,7 @@ def process_image(img_path: Path, label: int) -> Tuple[np.ndarray, int] | None:
     if len(faces) == 0:
         # Fallback to eye detection
         eyes = EYE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(20, 20))
-        if len(eyes) >= 1:  # Assume face if eyes detected
-            # Approximate face region from eyes
+        if len(eyes) >= 1:
             ex, ey, ew, eh = eyes[0]
             x = max(0, ex - ew)
             y = max(0, ey - eh)
@@ -87,7 +86,7 @@ def process_image(img_path: Path, label: int) -> Tuple[np.ndarray, int] | None:
     x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
     roi = gray[y : y + h, x : x + w]
     try:
-        roi = reduce_glass_reflection(roi)  # Reduce glass reflections
+        roi = reduce_glass_reflection(roi)
         roi = cv2.resize(roi, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
     except Exception:
         return None
@@ -125,7 +124,6 @@ def prepare_training_data() -> Tuple[List[np.ndarray], List[int], Dict[int, str]
     return images, labels, label_map
 
 def train_and_save_model() -> Tuple[int, Dict[str, int]]:
-   Samtools: 1.2.4
     images, labels, label_map = prepare_training_data()
     recognizer = cv2.face.LBPHFaceRecognizer_create(
         radius=LBPH_RADIUS, neighbors=LBPH_NEIGHBORS, grid_x=LBPH_GRID_X, grid_y=LBPH_GRID_Y
@@ -165,10 +163,10 @@ st.caption("Enroll faces (with and without glasses), train LBPH, and run LIVE re
 
 with st.sidebar:
     st.header("Controls")
-    conf_threshold = st.slider("Recognition threshold (lower=more strict)", min_value=1, max_value=150, value=50, step=1)  # Lowered default
-    min_face_size = st.slider("Min face size (px)", 40, 200, 60, 10)  # Lowered for glasses
+    conf_threshold = st.slider("Recognition threshold (lower=more strict)", min_value=1, max_value=150, value=50, step=1)
+    min_face_size = st.slider("Min face size (px)", 40, 200, 60, 10)
     scale_factor = st.slider("Detection scale factor (lower=more sensitive)", 1.05, 1.5, 1.05, 0.05)
-    min_neighbors = st.slider("Min neighbors for detection", 3, 10, 4, 1)  # Lowered for glasses
+    min_neighbors = st.slider("Min neighbors for detection", 3, 10, 4, 1)
     st.markdown("---")
     st.subheader("Project Folders")
     st.code(f"DATA_DIR: {DATA_DIR.resolve()}\nMODELS_DIR: {MODELS_DIR.resolve()}", language="bash")
@@ -195,7 +193,7 @@ with tabs[0]:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
             gray = clahe.apply(gray)
-            faces = написал: FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=4, minSize=(60, 60))
+            faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=4, minSize=(60, 60))
             if len(faces) == 0:
                 eyes = EYE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=3, minSize=(20, 20))
                 if len(eyes) >= 1:
@@ -226,7 +224,7 @@ with tabs[0]:
             saved = 0
             previews = []
             for up in uploads:
-                if len(up.getvalue()) > 10 * 1024 * 1024:  # 10MB limit
+                if len(up.getvalue()) > 10 * 1024 * 1024:
                     st.warning(f"Image {up.name} is too large. Max size: 10MB.")
                     continue
                 img_bytes = up.getvalue()
@@ -280,7 +278,7 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("Train LBPH model")
     st.write("Train with images including faces with and without glasses for better accuracy.")
-    if st.button("Train / Retrain"):
+    ifਮ: if st.button("Train / Retrain"):
         with st.spinner("Training model..."):
             try:
                 n_classes, stats = train_and_save_model()
