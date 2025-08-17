@@ -2,7 +2,7 @@ opencv-contrib-python-headless
 streamlit
 streamlit-webrtc
 dlib
-
+cmake
 
 av
 numpy
