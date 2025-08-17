@@ -15,6 +15,7 @@ from streamlit import rerun
 import imgaug.augmenters as iaa
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 import av
+import shutil
 
 # Setup logging
 logging.basicConfig(
@@ -50,7 +51,7 @@ FACE_RESIZE = (200, 200)
 
 # Minimum photos required per person
 MIN_PHOTOS_PER_PERSON = 2
-MIN_FACE_SIZE = 100
+MIN_FACE_SIZE = 80  # Reduced to allow smaller faces
 
 def load_labels() -> Dict[int, str]:
     try:
@@ -122,13 +123,14 @@ def process_image(img_path: Path, label: int) -> List[Tuple[np.ndarray, int]]:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         gray = cv2.equalizeHist(gray)
         faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.01, minNeighbors=1, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
+        logger.info(f"Image {img_path}: Resolution {gray.shape[1]}x{gray.shape[0]}, Faces detected: {len(faces)}")
         if len(faces) == 0:
-            if gray.shape[0] < 300 and gray.shape[1] < 300:
+            if gray.shape[0] < 300 and gray.shape[1] < 300 and np.std(gray) > 10:  # Basic quality check
                 logger.info(f"No faces detected in {img_path}; assuming cropped face")
                 roi = cv2.resize(gray, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
                 augmented_rois = advanced_augment(roi)
                 return [(aug_roi, label) for aug_roi in augmented_rois]
-            logger.warning(f"No faces detected in {img_path}")
+            logger.warning(f"No faces detected in {img_path} or image quality too low (std={np.std(gray):.1f})")
             return []
         x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
         if w < MIN_FACE_SIZE or h < MIN_FACE_SIZE:
@@ -270,7 +272,7 @@ with st.sidebar:
     st.info(f"Requires {MIN_PHOTOS_PER_PERSON} photo(s) per person for training.")
 
 # Define tabs
-tabs = st.tabs(["📇 Enroll", "🧠 Train", "🔴 Live Recognition"])  # Fix: Define tabs before use
+tabs = st.tabs(["📇 Enroll", "🧠 Train", "🔴 Live Recognition"])
 
 # --------- ENROLL TAB ---------
 with tabs[0]:
@@ -372,12 +374,12 @@ with tabs[0]:
                         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                         gray = cv2.equalizeHist(gray)
                         faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.01, minNeighbors=1, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
-                        st.write(f"Debug: Uploaded {uploaded_file.name}, Faces: {len(faces)}")
+                        st.write(f"Debug: Uploaded {uploaded_file.name}, Resolution: {img.shape[1]}x{img.shape[0]}, Faces: {len(faces)}")
                         if len(faces) > 0:
                             x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
                             if w * h < MIN_FACE_SIZE * MIN_FACE_SIZE:
                                 st.warning(f"Face too small in {uploaded_file.name}. Try a closer image.")
-                                logger.warning(f"Face too small in uploaded {uploaded_file.name}")
+                                logger.warning(f"Face too small in uploaded {uploaded_file.name}: {w}x{h}")
                             else:
                                 roi = img[y:y+h, x:x+w]
                                 file_path = person_dir / f"{uuid.uuid4().hex}.jpg"
@@ -436,7 +438,7 @@ with tabs[0]:
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                 gray = cv2.equalizeHist(gray)
                 faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.01, minNeighbors=1, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
-                st.write(f"Debug: Snapshot, Faces: {len(faces)}")
+                st.write(f"Debug: Snapshot, Resolution: {img.shape[1]}x{img.shape[0]}, Faces: {len(faces)}")
                 if len(faces) == 0:
                     st.warning("No face detected in snapshot. Adjust lighting or position.")
                     logger.warning("No face detected in snapshot")
@@ -444,7 +446,7 @@ with tabs[0]:
                     x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
                     if w * h < MIN_FACE_SIZE * MIN_FACE_SIZE:
                         st.warning("Face too small in snapshot. Move closer to the camera.")
-                        logger.warning("Face too small in snapshot")
+                        logger.warning(f"Face too small in snapshot: {w}x{h}")
                     else:
                         roi = img[y:y+h, x:x+w]
                         file_path = person_dir / f"{uuid.uuid4().hex}.jpg"
@@ -468,23 +470,44 @@ with tabs[0]:
             st.session_state.captured_count = 0
             st.session_state.show_camera = False
             st.session_state.snapshot_trigger = False
+            if person_dir.exists():
+                shutil.rmtree(person_dir)
+                ensure_dir(person_dir)
+                logger.info(f"Cleared all captures for {person_name} by deleting {person_dir}")
             status_text.write(f"Cleared captures for {person_name}. Start over.")
-            logger.info(f"Cleared captures for {person_name}")
+            st.success(f"Cleared all captures for {person_name}.")
             rerun()
 
-        # Display Captured Images
-        st.markdown("### Captured Images")
+        # Debug: Image Inspection
+        st.markdown("### Captured Images Debug")
         image_files = list(person_dir.glob("*.jpg")) + list(person_dir.glob("*.png"))
+        debug_data = []
         if image_files:
-            cols = st.columns(3)
-            for i, img_path in enumerate(image_files):
+            for img_path in image_files:
                 img = cv2.imread(str(img_path))
                 if img is not None:
+                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.01, minNeighbors=1, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
+                    face_status = f"{len(faces)} face(s) detected" if len(faces) > 0 else "No faces detected"
+                    debug_data.append({
+                        "Image": img_path.name,
+                        "Resolution": f"{img.shape[1]}x{img.shape[0]}",
+                        "Face Status": face_status,
+                        "Std Dev": f"{np.std(gray):.1f}"
+                    })
                     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-                    cols[i % 3].image(img_rgb, caption=img_path.name, use_column_width=True)
+                    st.image(img_rgb, caption=f"{img_path.name}: {face_status}", use_column_width=True)
                 else:
-                    logger.warning(f"Failed to load image for display: {img_path}")
+                    debug_data.append({
+                        "Image": img_path.name,
+                        "Resolution": "Failed to load",
+                        "Face Status": "Invalid image",
+                        "Std Dev": "N/A"
+                    })
+                    logger.warning(f"Failed to load image for debug: {img_path}")
                     st.warning(f"Failed to load image: {img_path.name}")
+            st.write("### Image Debug Table")
+            st.dataframe(pd.DataFrame(debug_data))
         else:
             st.info("No images captured yet.")
 
@@ -502,7 +525,6 @@ with tabs[0]:
     if stats:
         delete_person = st.selectbox("Delete a person's dataset", [""] + list(stats.keys()))
         if delete_person and st.button("Confirm Delete"):
-            import shutil
             shutil.rmtree(DATA_DIR / delete_person)
             st.success(f"Deleted dataset for {delete_person}.")
             logger.info(f"Deleted dataset for {delete_person}")
@@ -515,6 +537,7 @@ with tabs[0]:
 with tabs[1]:
     st.subheader("Train LBPH Model")
     st.write(f"Requires at least {MIN_PHOTOS_PER_PERSON} photo(s) per person, with enhanced augmentation for robust training.")
+    st.info("If training fails, check the 'Captured Images Debug' section in the Enroll tab for images with 'No faces detected' and recapture with better lighting or closer proximity.")
     if st.button("Train / Retrain"):
         with st.spinner("Training model..."):
             try:
@@ -523,7 +546,7 @@ with tabs[1]:
                 st.json(stats)
                 logger.info(f"Training completed successfully with {n_classes} classes")
             except RuntimeError as e:
-                st.error(f"Training failed: {e}. Check logs for details. Try capturing clearer, larger face images.")
+                st.error(f"Training failed: {e}. Check the 'Captured Images Debug' section in the Enroll tab and logs for details. Ensure images contain clear faces larger than {MIN_FACE_SIZE}x{MIN_FACE_SIZE} pixels.")
                 logger.error(f"Training failed: {e}")
             except Exception as e:
                 st.error(f"Unexpected error: {str(e)}. See logs for details.")
