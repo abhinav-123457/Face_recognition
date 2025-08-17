@@ -1,8 +1,9 @@
+opencv-python==4.4.0.44
 streamlit
 streamlit-webrtc
-opencv-python==4.4.0.44
+python==3.10
+
 av
 numpy
-
 pandas
 matplotlib
