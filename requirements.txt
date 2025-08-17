@@ -7,3 +7,4 @@ av
 numpy
 pandas
 matplotlib
+ffmpeg
