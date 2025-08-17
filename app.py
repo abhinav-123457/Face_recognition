@@ -116,10 +116,13 @@ def process_image(img_path: Path, label: int) -> List[Tuple[np.ndarray, int]]:
             return []
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         gray = cv2.equalizeHist(gray)
-        faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(50, 50))
+        faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.01, minNeighbors=1, minSize=(30, 30))  # Relaxed params
         if len(faces) == 0:
-            logger.info(f"No faces detected in {img_path}")
-            return []
+            # Fallback: If no face detected, assume image is already a face (from capture crop)
+            logger.info(f"No faces detected in {img_path}; using whole image as ROI")
+            roi = cv2.resize(gray, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
+            augmented_rois = advanced_augment(roi)
+            return [(aug_roi, label) for aug_roi in augmented_rois]
         x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
         roi = gray[y:y+h, x:x+w]
         roi = cv2.resize(roi, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
@@ -131,7 +134,7 @@ def process_image(img_path: Path, label: int) -> List[Tuple[np.ndarray, int]]:
         logger.error(f"Error processing image {img_path}: {e}")
         return []
 
-def prepare_training_data() -> Tuple[List[np.ndarray], List[int], Dict[int, str]]:
+def prepare_training_data() -> Tuple[List[np.ndarray], List[int], Dict[int, str]:
     images = []
     labels = []
     label_map: Dict[int, str] = {}
@@ -251,8 +254,8 @@ with tabs[0]:
     st.subheader("Enroll a Person")
     person_name = st.text_input("Person name", placeholder="e.g., Abhinav")
     sanitized_name = sanitize_name(person_name) if person_name else ""
-    st.write(f"Capture at least {MIN_PHOTOS_PER_PERSON} photo(s) for {person_name or 'a person'}. Augmentation enables single-photo training.")
-    st.info("Tips: Click 'Start Capture' once, then face the camera and vary poses slightly. Photos are processed automatically every ~2 seconds.")
+    st.write(f"Capture or upload at least {MIN_PHOTOS_PER_PERSON} photo(s) for {person_name or 'a person'}. Augmentation enables single-photo training.")
+    st.info("Tips: If camera fails, use the upload option below. Ensure browser allows camera access.")
 
     if sanitized_name:
         person_dir = DATA_DIR / sanitized_name
@@ -271,6 +274,31 @@ with tabs[0]:
         progress_bar = st.progress(current_count / MIN_PHOTOS_PER_PERSON)
         status_text = st.empty()
         status_text.write(f"Progress: {current_count}/{MIN_PHOTOS_PER_PERSON} photos captured for {person_name}")
+
+        # Add File Uploader as Fallback
+        uploaded_files = st.file_uploader("Upload photos (fallback if camera fails)", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
+        if uploaded_files:
+            for uploaded_file in uploaded_files:
+                img_bytes = uploaded_file.read()
+                img_array = np.frombuffer(img_bytes, dtype=np.uint8)
+                img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                if img is not None:
+                    # Process similarly to capture (detect and crop face)
+                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    gray = cv2.equalizeHist(gray)
+                    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(50, 50))
+                    if len(faces) > 0:
+                        x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
+                        roi = img[y:y+h, x:x+w]
+                        file_path = person_dir / f"{uuid.uuid4().hex}.jpg"
+                        cv2.imwrite(str(file_path), roi)
+                        st.success(f"Uploaded and saved {uploaded_file.name} for {person_name}")
+                        logger.info(f"Saved uploaded image for {person_name}: {file_path.name}")
+                    else:
+                        st.warning(f"No face detected in uploaded {uploaded_file.name}. Try another image.")
+                else:
+                    st.error(f"Failed to decode uploaded {uploaded_file.name}.")
+            rerun()  # Refresh stats
 
         if current_count < MIN_PHOTOS_PER_PERSON:
             if st.button("Start Capture", disabled=st.session_state.capture_active):
@@ -366,8 +394,10 @@ with tabs[1]:
                 n_classes, stats = train_and_save_model()
                 st.success(f"Training complete. Classes: {n_classes}. Model saved to `{MODEL_PATH}`.")
                 st.json(stats)
+            except RuntimeError as e:
+                st.error(f"Training failed: {e}. Check logs for details (e.g., no faces detected). Try uploading clearer images.")
             except Exception as e:
-                st.error(str(e))
+                st.error(f"Unexpected error: {str(e)}. See logs.")
 
     if LABELS_PATH.exists():
         st.markdown("#### Current Labels")
