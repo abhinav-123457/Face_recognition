@@ -131,7 +131,7 @@ def process_image(img_path: Path, label: int) -> List[Tuple[np.ndarray, int]]:
         logger.error(f"Error processing image {img_path}: {e}")
         return []
 
-def prepare_training_data() -> Tuple[List[np.ndarray], List[int], Dict[int, str]:
+def prepare_training_data() -> Tuple[List[np.ndarray], List[int], Dict[int, str]]:
     images = []
     labels = []
     label_map: Dict[int, str] = {}
