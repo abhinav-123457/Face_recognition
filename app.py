@@ -122,7 +122,7 @@ def process_image(img_path: Path, label: int) -> List[Tuple[np.ndarray, int]]:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         gray = cv2.equalizeHist(gray)
         faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.01, minNeighbors=1, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
-        logger.info(f"Image {img_path}: Resolution {gray.shape[1]}x{gray.shape[0]}, Faces detected: {len(faces)}")
+        logger.info(f"Image {img_path}: Resolution {gray.shape[1]}x{gray.shape[0]}, Faces detected: {len(faces)}, Contrast std: {np.std(gray):.1f}")
         if len(faces) == 0:
             if gray.shape[0] < 300 and gray.shape[1] < 300 and np.std(gray) > 10:
                 logger.info(f"No faces detected in {img_path}; assuming cropped face")
@@ -334,9 +334,9 @@ with tabs[0]:
                                 logger.warning("No face detected in webcam capture")
                             else:
                                 x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
-                                if w * h < MIN_FACE_SIZE * MIN_FACE_SIZE:
+                                if w < MIN_FACE_SIZE or h < MIN_FACE_SIZE:
                                     st.warning("Face too small. Move closer to the camera.")
-                                    logger.warning("Face too small in webcam capture")
+                                    logger.warning(f"Face too small in webcam capture: {w}x{h}")
                                 else:
                                     roi = img[y:y+h, x:x+w]
                                     file_path = person_dir / f"{uuid.uuid4().hex}.jpg"
@@ -376,7 +376,7 @@ with tabs[0]:
                         st.write(f"Debug: Uploaded {uploaded_file.name}, Resolution: {img.shape[1]}x{img.shape[0]}, Faces: {len(faces)}")
                         if len(faces) > 0:
                             x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
-                            if w * h < MIN_FACE_SIZE * MIN_FACE_SIZE:
+                            if w < MIN_FACE_SIZE or h < MIN_FACE_SIZE:
                                 st.warning(f"Face too small in {uploaded_file.name}. Try a closer image.")
                                 logger.warning(f"Face too small in uploaded {uploaded_file.name}: {w}x{h}")
                             else:
@@ -403,14 +403,25 @@ with tabs[0]:
                 st.session_state.snapshot_trigger = True
                 logger.info(f"Triggered snapshot capture for {person_name}")
 
+            class VideoCaptureProcessor:
+                def __init__(self):
+                    self.last_frame = None
+
+                def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+                    img = frame.to_ndarray(format="bgr24")
+                    self.last_frame = img
+                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.01, minNeighbors=1, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
+                    for (x, y, w, h) in faces:
+                        cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                        draw_label(img, f"Face: {w}x{h}", x, y)
+                    return av.VideoFrame.from_ndarray(img, format="bgr24")
+
             try:
                 ctx = webrtc_streamer(
                     key="capture",
                     mode=WebRtcMode.SENDRECV,
-                    video_processor_factory=lambda: type('VideoCaptureProcessor', (), {
-                        '__init__': lambda self: setattr(self, 'last_frame', None),
-                        'recv': lambda self, frame: self._recv(frame)
-                    })(),
+                    video_processor_factory=VideoCaptureProcessor,
                     rtc_configuration=RTCConfiguration({
                         "iceServers": [
                             {"urls": ["stun:stun.l.google.com:19302"]},
@@ -434,57 +445,37 @@ with tabs[0]:
                     async_processing=True,
                 )
 
-                if ctx and hasattr(ctx, 'video_processor'):
-                    ctx.video_processor._recv = lambda frame: type('VideoCaptureProcessor', (), {
-                        'recv': lambda self, frame: (
-                            setattr(self, 'last_frame', frame.to_ndarray(format="bgr24")),
-                            av.VideoFrame.from_ndarray(
-                                (lambda img: (
-                                    [cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2) or draw_label(img, f"Face: {w}x{h}", x, y)
-                                     for (x, y, w, h) in FACE_CASCADE.detectMultiScale(
-                                         cv2.cvtColor(img, cv2.COLOR_BGR2GRAY),
-                                         scaleFactor=1.01, minNeighbors=1, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE)
-                                     )] or img
-                                )(frame.to_ndarray(format="bgr24")),
-                                format="bgr24"
-                            )
-                        )[1]
-                    })().recv(frame)
-                else:
-                    st.error("Failed to initialize live video. Use webcam capture or file upload instead.")
-                    logger.error("WebRTC initialization failed for capture")
+                if st.session_state.snapshot_trigger and ctx and hasattr(ctx, 'video_processor') and ctx.video_processor.last_frame is not None:
+                    img = ctx.video_processor.last_frame
+                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                    gray = cv2.equalizeHist(gray)
+                    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.01, minNeighbors=1, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
+                    st.write(f"Debug: Snapshot, Resolution: {img.shape[1]}x{img.shape[0]}, Faces: {len(faces)}")
+                    if len(faces) == 0:
+                        st.warning("No face detected in snapshot. Adjust lighting or position.")
+                        logger.warning("No face detected in snapshot")
+                    else:
+                        x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
+                        if w < MIN_FACE_SIZE or h < MIN_FACE_SIZE:
+                            st.warning("Face too small in snapshot. Move closer to the camera.")
+                            logger.warning(f"Face too small in snapshot: {w}x{h}")
+                        else:
+                            roi = img[y:y+h, x:x+w]
+                            file_path = person_dir / f"{uuid.uuid4().hex}.jpg"
+                            cv2.imwrite(str(file_path), roi)
+                            st.session_state.captured_count += 1
+                            st.success(f"Saved snapshot {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} for {person_name}")
+                            st.image(img, caption="Captured Snapshot", use_column_width=True)
+                            logger.info(f"Saved snapshot for {person_name}: {file_path.name}")
+                            progress_bar.progress(min(st.session_state.captured_count / MIN_PHOTOS_PER_PERSON, 1.0))
+                            status_text.write(f"Progress: {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} photos captured for {person_name}")
+                            if st.session_state.captured_count >= MIN_PHOTOS_PER_PERSON:
+                                status_text.success(f"Completed capturing {MIN_PHOTOS_PER_PERSON} photo(s) for {person_name}! Ready to train.")
+                            st.session_state.snapshot_trigger = False
+                            rerun()
             except Exception as e:
                 st.error("Live video failed to connect. Check your network or use webcam capture/file upload.")
                 logger.error(f"WebRTC capture failed: {e}")
-
-            if st.session_state.snapshot_trigger and ctx and hasattr(ctx, 'video_processor') and ctx.video_processor.last_frame is not None:
-                img = ctx.video_processor.last_frame
-                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                gray = cv2.equalizeHist(gray)
-                faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.01, minNeighbors=1, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
-                st.write(f"Debug: Snapshot, Resolution: {img.shape[1]}x{img.shape[0]}, Faces: {len(faces)}")
-                if len(faces) == 0:
-                    st.warning("No face detected in snapshot. Adjust lighting or position.")
-                    logger.warning("No face detected in snapshot")
-                else:
-                    x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
-                    if w * h < MIN_FACE_SIZE * MIN_FACE_SIZE:
-                        st.warning("Face too small in snapshot. Move closer to the camera.")
-                        logger.warning(f"Face too small in snapshot: {w}x{h}")
-                    else:
-                        roi = img[y:y+h, x:x+w]
-                        file_path = person_dir / f"{uuid.uuid4().hex}.jpg"
-                        cv2.imwrite(str(file_path), roi)
-                        st.session_state.captured_count += 1
-                        st.success(f"Saved snapshot {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} for {person_name}")
-                        st.image(img, caption="Captured Snapshot", use_column_width=True)
-                        logger.info(f"Saved snapshot for {person_name}: {file_path.name}")
-                        progress_bar.progress(min(st.session_state.captured_count / MIN_PHOTOS_PER_PERSON, 1.0))
-                        status_text.write(f"Progress: {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} photos captured for {person_name}")
-                        if st.session_state.captured_count >= MIN_PHOTOS_PER_PERSON:
-                            status_text.success(f"Completed capturing {MIN_PHOTOS_PER_PERSON} photo(s) for {person_name}! Ready to train.")
-                        st.session_state.snapshot_trigger = False
-                        rerun()
 
         if current_count >= MIN_PHOTOS_PER_PERSON:
             st.success(f"Completed capturing {MIN_PHOTOS_PER_PERSON} photo(s) for {person_name}! Ready to train.")
