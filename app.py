@@ -13,6 +13,8 @@ import time
 import pandas as pd
 from streamlit import rerun
 import imgaug.augmenters as iaa
+from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
+import av
 
 # Setup logging
 logging.basicConfig(
@@ -25,7 +27,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-APP_TITLE = "Streamlit Face Recognition (OpenCV LBPH - Single Photo Support)"
+APP_TITLE = "Streamlit Face Recognition (OpenCV LBPH - Enhanced Model)"
 DATA_DIR = Path("data")
 MODELS_DIR = Path("models")
 LOGS_DIR = Path("logs")
@@ -39,15 +41,16 @@ FACE_CASCADE = cv2.CascadeClassifier(CASCADE_PATH)
 MODEL_PATH = MODELS_DIR / "lbph_model.xml"
 LABELS_PATH = MODELS_DIR / "labels.json"
 
-# Optimized LBPH parameters
-LBPH_RADIUS = 1
-LBPH_NEIGHBORS = 6
-LBPH_GRID_X = 6
-LBPH_GRID_Y = 6
+# Enhanced LBPH parameters
+LBPH_RADIUS = 2  # Increased for more robust feature capture
+LBPH_NEIGHBORS = 8  # More neighbors for better matching
+LBPH_GRID_X = 8  # Finer grid for detailed histograms
+LBPH_GRID_Y = 8
 FACE_RESIZE = (200, 200)
 
-# Minimum photos required per person - set to 1 for single photo support
+# Minimum photos required per person
 MIN_PHOTOS_PER_PERSON = 1
+MIN_FACE_SIZE = 100  # Minimum face size (pixels) for quality control
 
 def load_labels() -> Dict[int, str]:
     try:
@@ -88,7 +91,7 @@ def rotate_image(image: np.ndarray, angle: float) -> np.ndarray:
         return image
 
 def advanced_augment(roi: np.ndarray) -> List[np.ndarray]:
-    """Advanced augmentation for single photo: rotations, flips, brightness, contrast, noise."""
+    """Enhanced augmentation: rotations, flips, brightness, contrast, noise, scaling, shearing, blur."""
     aug_images = [roi, cv2.flip(roi, 1)]
     angles = [-15, -10, -5, 5, 10, 15]
     for angle in angles:
@@ -96,12 +99,15 @@ def advanced_augment(roi: np.ndarray) -> List[np.ndarray]:
         aug_images.append(rot)
         aug_images.append(cv2.flip(rot, 1))
 
-    # Brightness and contrast
-    seq_brightness = iaa.Sequential([iaa.AddToBrightness((-30, 30))])
-    seq_contrast = iaa.Sequential([iaa.ContrastNormalization((0.8, 1.2))])
-    seq_noise = iaa.Sequential([iaa.AdditiveGaussianNoise(scale=(0, 0.05 * 255))])
+    # Enhanced augmentations
+    seq_brightness = iaa.Sequential([iaa.AddToBrightness((-40, 40))])
+    seq_contrast = iaa.Sequential([iaa.ContrastNormalization((0.7, 1.3))])
+    seq_noise = iaa.Sequential([iaa.AdditiveGaussianNoise(scale=(0, 0.07 * 255))])
+    seq_scale = iaa.Sequential([iaa.Affine(scale=(0.8, 1.2))])  # Zoom in/out
+    seq_shear = iaa.Sequential([iaa.Affine(shear=(-10, 10))])  # Shear transformation
+    seq_blur = iaa.Sequential([iaa.GaussianBlur(sigma=(0, 1.0))])  # Slight blur
 
-    for aug in [seq_brightness, seq_contrast, seq_noise]:
+    for aug in [seq_brightness, seq_contrast, seq_noise, seq_scale, seq_shear, seq_blur]:
         augmented = aug(image=roi)
         aug_images.append(augmented)
         aug_images.append(cv2.flip(augmented, 1))
@@ -116,14 +122,16 @@ def process_image(img_path: Path, label: int) -> List[Tuple[np.ndarray, int]]:
             return []
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         gray = cv2.equalizeHist(gray)
-        faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.01, minNeighbors=1, minSize=(30, 30))  # Relaxed params
+        faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.01, minNeighbors=1, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
         if len(faces) == 0:
-            # Fallback: If no face detected, assume image is already a face (from capture crop)
             logger.info(f"No faces detected in {img_path}; using whole image as ROI")
             roi = cv2.resize(gray, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
             augmented_rois = advanced_augment(roi)
             return [(aug_roi, label) for aug_roi in augmented_rois]
         x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
+        if w < MIN_FACE_SIZE or h < MIN_FACE_SIZE:
+            logger.warning(f"Face too small in {img_path}: {w}x{h}")
+            return []
         roi = gray[y:y+h, x:x+w]
         roi = cv2.resize(roi, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
         augmented_rois = advanced_augment(roi)
@@ -165,7 +173,7 @@ def prepare_training_data() -> Tuple[List[np.ndarray], List[int], Dict[int, str]
                 labels.append(label)
 
     if len(images) == 0 or len(set(labels)) == 0:
-        raise RuntimeError("Not enough data to train. Add images for at least one person.")
+        raise RuntimeError("Not enough valid faces detected for training. Ensure images contain clear, large faces.")
     
     logger.info(f"Prepared training data: {len(images)} images, {len(set(labels))} classes")
     return images, labels, label_map
@@ -173,6 +181,8 @@ def prepare_training_data() -> Tuple[List[np.ndarray], List[int], Dict[int, str]
 def train_and_save_model() -> Tuple[int, Dict[str, int]]:
     try:
         images, labels, label_map = prepare_training_data()
+        if len(images) < MIN_PHOTOS_PER_PERSON * len(label_map):
+            raise RuntimeError(f"Insufficient valid faces after processing: {len(images)} images for {len(label_map)} classes.")
         recognizer = cv2.face.LBPHFaceRecognizer_create(
             radius=LBPH_RADIUS, neighbors=LBPH_NEIGHBORS, grid_x=LBPH_GRID_X, grid_y=LBPH_GRID_Y
         )
@@ -183,7 +193,7 @@ def train_and_save_model() -> Tuple[int, Dict[str, int]]:
         logger.info(f"Model trained with {len(set(labels))} classes and saved to {MODEL_PATH}")
         return len(set(labels)), stats
     except Exception as e:
-        logger.error(f"Training failed: {e}")
+        logger.error(f"Training failed: {str(e)}")
         raise
 
 def load_model():
@@ -219,14 +229,14 @@ def sanitize_name(name: str) -> str:
 # ---------- Streamlit UI ----------
 st.set_page_config(page_title=APP_TITLE, page_icon="🎥", layout="wide")
 st.title(APP_TITLE)
-st.caption(f"Supports training with 1-2 photos via advanced augmentation. Semi-autonomous capture available.")
+st.caption(f"Enhanced LBPH model with advanced augmentation (rotations, flips, brightness, contrast, noise, scaling, shearing, blur). Capture from live video or upload images.")
 
 with st.sidebar:
     st.header("Controls")
     conf_threshold = st.slider("Recognition threshold (lower=strict)", min_value=1, max_value=100, value=50, step=1)
-    min_face_size = st.slider("Min face size (px)", 50, 200, 80, 10)
-    scale_factor = st.slider("Detection scale factor", 1.05, 1.5, 1.1, 0.05)
-    min_neighbors = st.slider("Min neighbors", 3, 10, 3, 1)
+    min_face_size = st.slider("Min face size (px)", 50, 200, MIN_FACE_SIZE, 10)
+    scale_factor = st.slider("Detection scale factor", 1.01, 1.5, 1.1, 0.01)
+    min_neighbors = st.slider("Min neighbors", 1, 10, 3, 1)
     st.markdown("---")
     st.subheader("Model Status")
     if MODEL_PATH.exists():
@@ -245,7 +255,7 @@ with st.sidebar:
         with open(log_file, "rb") as f:
             st.download_button("Download Logs", f, file_name="face_recognition.log")
     st.markdown("---")
-    st.info(f"Supports training with {MIN_PHOTOS_PER_PERSON} photo(s) per person via augmentation.")
+    st.info(f"Supports training with {MIN_PHOTOS_PER_PERSON} photo(s) per person via enhanced augmentation.")
 
 tabs = st.tabs(["📇 Enroll", "🧠 Train", "🔴 Live Recognition"])
 
@@ -254,20 +264,16 @@ with tabs[0]:
     st.subheader("Enroll a Person")
     person_name = st.text_input("Person name", placeholder="e.g., Abhinav")
     sanitized_name = sanitize_name(person_name) if person_name else ""
-    st.write(f"Capture or upload at least {MIN_PHOTOS_PER_PERSON} photo(s) for {person_name or 'a person'}. Augmentation enables single-photo training.")
-    st.info("Tips: If camera fails, use the upload option below. Ensure browser allows camera access.")
+    st.write(f"Capture from live video or upload at least {MIN_PHOTOS_PER_PERSON} photo(s) for {person_name or 'a person'}. Augmentation enables single-photo training.")
+    st.info("Tips: Use 'Capture Snapshot' from live video or upload clear face images. Ensure good lighting and large faces.")
 
     if sanitized_name:
         person_dir = DATA_DIR / sanitized_name
         ensure_dir(person_dir)
         if "captured_count" not in st.session_state:
             st.session_state.captured_count = 0
-        if "capture_key" not in st.session_state:
-            st.session_state.capture_key = 0
-        if "capture_active" not in st.session_state:
-            st.session_state.capture_active = False
-        if "last_capture_time" not in st.session_state:
-            st.session_state.last_capture_time = 0
+        if "snapshot_trigger" not in st.session_state:
+            st.session_state.snapshot_trigger = False
 
         stats = collect_dataset_stats()
         current_count = stats.get(sanitized_name, 0)
@@ -275,18 +281,17 @@ with tabs[0]:
         status_text = st.empty()
         status_text.write(f"Progress: {current_count}/{MIN_PHOTOS_PER_PERSON} photos captured for {person_name}")
 
-        # Add File Uploader as Fallback
-        uploaded_files = st.file_uploader("Upload photos (fallback if camera fails)", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
+        # File Uploader
+        uploaded_files = st.file_uploader("Upload photos", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
         if uploaded_files:
             for uploaded_file in uploaded_files:
                 img_bytes = uploaded_file.read()
                 img_array = np.frombuffer(img_bytes, dtype=np.uint8)
                 img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
                 if img is not None:
-                    # Process similarly to capture (detect and crop face)
                     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                     gray = cv2.equalizeHist(gray)
-                    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(50, 50))
+                    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
                     if len(faces) > 0:
                         x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
                         roi = img[y:y+h, x:x+w]
@@ -298,70 +303,74 @@ with tabs[0]:
                         st.warning(f"No face detected in uploaded {uploaded_file.name}. Try another image.")
                 else:
                     st.error(f"Failed to decode uploaded {uploaded_file.name}.")
-            rerun()  # Refresh stats
+            rerun()
 
-        if current_count < MIN_PHOTOS_PER_PERSON:
-            if st.button("Start Capture", disabled=st.session_state.capture_active):
-                st.session_state.capture_active = True
-                st.session_state.captured_count = current_count
-                st.session_state.last_capture_time = time.time()
-                st.session_state.capture_key = random.randint(1, 10000)  # Random key to force widget reset
-                logger.info(f"Started capture for {person_name}")
+        # Live Video Capture with Snapshot
+        st.subheader("Live Video Capture")
+        if st.button("Capture Snapshot"):
+            st.session_state.snapshot_trigger = True
 
-            if st.session_state.capture_active:
-                if time.time() - st.session_state.last_capture_time < 2:  # 2-second delay
-                    st.write(f"Waiting for next capture... ({int(2 - (time.time() - st.session_state.last_capture_time))}s)")
+        class VideoCaptureProcessor:
+            def __init__(self):
+                self.last_frame = None
+
+            def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
+                img = frame.to_ndarray(format="bgr24")
+                self.last_frame = img
+                gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
+                for (x, y, w, h) in faces:
+                    cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    draw_label(img, f"Face: {w}x{h}", x, y)
+                return av.VideoFrame.from_ndarray(img, format="bgr24")
+
+        ctx = webrtc_streamer(
+            key="capture",
+            mode=WebRtcMode.SENDRECV,
+            video_processor_factory=VideoCaptureProcessor,
+            rtc_configuration=RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}),
+            media_stream_constraints={
+                "video": {
+                    "width": {"ideal": 640},
+                    "height": {"ideal": 480},
+                    "frameRate": {"ideal": 15}
+                },
+                "audio": False
+            },
+            async_processing=True,
+        )
+
+        if st.session_state.snapshot_trigger and ctx.video_processor and ctx.video_processor.last_frame is not None:
+            img = ctx.video_processor.last_frame
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            gray = cv2.equalizeHist(gray)
+            faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
+            if len(faces) == 0:
+                st.warning("No face detected in snapshot. Adjust lighting or position.")
+                logger.warning("No face detected in snapshot")
+            else:
+                x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
+                if w * h < MIN_FACE_SIZE * MIN_FACE_SIZE:
+                    st.warning("Face too small in snapshot. Move closer to the camera.")
+                    logger.warning("Face too small in snapshot")
                 else:
-                    cam_img = st.camera_input("Capture image", key=f"cam_{st.session_state.capture_key}")
-                    if cam_img:
-                        img_bytes = cam_img.getvalue()
-                        img_array = np.frombuffer(img_bytes, dtype=np.uint8)
-                        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-                        if img is None:
-                            st.error("Failed to decode image. Try again.")
-                            logger.error("Failed to decode webcam capture")
-                        else:
-                            img = cv2.resize(img, (640, 480), interpolation=cv2.INTER_LINEAR)
-                            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                            gray = cv2.equalizeHist(gray)
-                            faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(50, 50))
-                            st.write(f"Debug: Image resolution: {img.shape[1]}x{img.shape[0]}, Faces: {len(faces)}")
-                            if len(faces) == 0:
-                                st.warning("No face detected. Adjust lighting or position.")
-                                logger.warning("No face detected in webcam capture")
-                            else:
-                                x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
-                                if w * h < 2500:
-                                    st.warning("Face too small. Move closer to the camera.")
-                                    logger.warning("Face too small in webcam capture")
-                                else:
-                                    roi = img[y:y+h, x:x+w]
-                                    file_path = person_dir / f"{uuid.uuid4().hex}.jpg"
-                                    cv2.imwrite(str(file_path), roi)
-                                    st.session_state.captured_count += 1
-                                    st.session_state.last_capture_time = time.time()
-                                    st.success(f"Saved capture {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} for {person_name}")
-                                    st.image(img_bytes, caption="Captured Image", use_column_width=True)
-                                    logger.info(f"Saved webcam capture for {person_name}: {file_path.name}")
-                                    progress_bar.progress(st.session_state.captured_count / MIN_PHOTOS_PER_PERSON)
-                                    status_text.write(f"Progress: {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} photos captured for {person_name}")
-                                    if st.session_state.captured_count >= MIN_PHOTOS_PER_PERSON:
-                                        st.session_state.capture_active = False
-                                        status_text.success(f"Completed capturing {MIN_PHOTOS_PER_PERSON} photo(s) for {person_name}! Ready to train.")
-                                        logger.info(f"Capture completed for {person_name}: {MIN_PHOTOS_PER_PERSON} photos")
-                                    else:
-                                        st.session_state.capture_key = random.randint(1, 10000)  # Reset widget
-                                        rerun()  # Refresh to trigger next capture
-        else:
+                    roi = img[y:y+h, x:x+w]
+                    file_path = person_dir / f"{uuid.uuid4().hex}.jpg"
+                    cv2.imwrite(str(file_path), roi)
+                    st.session_state.captured_count += 1
+                    st.success(f"Saved snapshot {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} for {person_name}")
+                    st.image(img, caption="Captured Snapshot", use_column_width=True)
+                    logger.info(f"Saved snapshot for {person_name}: {file_path.name}")
+                    progress_bar.progress(st.session_state.captured_count / MIN_PHOTOS_PER_PERSON)
+                    status_text.write(f"Progress: {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} photos captured for {person_name}")
+                    if st.session_state.captured_count >= MIN_PHOTOS_PER_PERSON:
+                        status_text.success(f"Completed capturing {MIN_PHOTOS_PER_PERSON} photo(s) for {person_name}! Ready to train.")
+                    st.session_state.snapshot_trigger = False
+                    rerun()
+
+        if current_count >= MIN_PHOTOS_PER_PERSON:
             st.success(f"Completed capturing {MIN_PHOTOS_PER_PERSON} photo(s) for {person_name}! Ready to train.")
             progress_bar.progress(1.0)
-            st.session_state.capture_active = False
-
-        if st.session_state.capture_active and st.button("Stop Capture"):
-            st.session_state.capture_active = False
-            status_text.write(f"Capture stopped. Captured {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} photos for {person_name}")
-            logger.info(f"Capture stopped for {person_name}: {st.session_state.captured_count} photos")
-            rerun()
 
     else:
         st.warning("Enter a person name to start capturing.")
@@ -381,13 +390,12 @@ with tabs[0]:
             st.success(f"Deleted dataset for {delete_person}.")
             logger.info(f"Deleted dataset for {delete_person}")
             st.session_state.captured_count = 0
-            st.session_state.capture_active = False
             rerun()
 
 # --------- TRAIN TAB ---------
 with tabs[1]:
     st.subheader("Train LBPH Model")
-    st.write(f"Requires at least {MIN_PHOTOS_PER_PERSON} photo(s) per person, with augmentation for single-photo support.")
+    st.write(f"Requires at least {MIN_PHOTOS_PER_PERSON} photo(s) per person, with enhanced augmentation for robust training.")
     if st.button("Train / Retrain"):
         with st.spinner("Training model..."):
             try:
@@ -395,9 +403,9 @@ with tabs[1]:
                 st.success(f"Training complete. Classes: {n_classes}. Model saved to `{MODEL_PATH}`.")
                 st.json(stats)
             except RuntimeError as e:
-                st.error(f"Training failed: {e}. Check logs for details (e.g., no faces detected). Try uploading clearer images.")
+                st.error(f"Training failed: {e}. Check logs for details (e.g., no valid faces detected). Try uploading clearer, larger face images.")
             except Exception as e:
-                st.error(f"Unexpected error: {str(e)}. See logs.")
+                st.error(f"Unexpected error: {str(e)}. See logs for details.")
 
     if LABELS_PATH.exists():
         st.markdown("#### Current Labels")
@@ -413,9 +421,7 @@ with tabs[2]:
         st.warning("No trained model found. Train the model first.")
     else:
         id_to_name = {int(k): v for k, v in id_to_name.items()}
-        from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
-        import av
-
+        
         class VideoProcessor:
             def __init__(self):
                 self.recognizer = recognizer
@@ -442,7 +448,7 @@ with tabs[2]:
                             gray,
                             scaleFactor=st.session_state.get("scale_factor", 1.1),
                             minNeighbors=st.session_state.get("min_neighbors", 3),
-                            minSize=(st.session_state.get("min_face_size", 80), st.session_state.get("min_face_size", 80)),
+                            minSize=(st.session_state.get("min_face_size", MIN_FACE_SIZE), st.session_state.get("min_face_size", MIN_FACE_SIZE)),
                         )
                         self.last_faces = faces
                     else:
@@ -487,12 +493,11 @@ with tabs[2]:
             st.session_state["min_neighbors"] = min_neighbors
 
         try:
-            rtc_config = RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]})
             webrtc_streamer(
                 key="live",
                 mode=WebRtcMode.SENDRECV,
                 video_processor_factory=VideoProcessor,
-                rtc_configuration=rtc_config,
+                rtc_configuration=RTCConfiguration({"iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]}),
                 media_stream_constraints={
                     "video": {
                         "width": {"ideal": 640},
@@ -508,4 +513,4 @@ with tabs[2]:
             logger.error(f"WebRTC initialization failed: {e}")
 
 st.markdown("---")
-st.caption(f"Enhancements: Supports single-photo training with advanced augmentation (rotations, flips, brightness, contrast, noise). Semi-autonomous capture for ease.")
+st.caption(f"Enhancements: Improved LBPH model with advanced augmentation (rotations, flips, brightness, contrast, noise, scaling, shearing, blur). Capture via live video snapshots or file upload.")
