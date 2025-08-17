@@ -4,7 +4,7 @@ streamlit
 streamlit-webrtc
 imgaug
 av
-numpy
+numpy==1.23.5
 pandas
 matplotlib
 ffmpeg
