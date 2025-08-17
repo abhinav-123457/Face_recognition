@@ -9,8 +9,11 @@ import numpy as np
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, WebRtcMode, RTCConfiguration
 from concurrent.futures import ThreadPoolExecutor
+import random
+import time
+import pandas as pd
 
-APP_TITLE = "Live Face Recognition (Streamlit + WebRTC, OpenCV LBPH)"
+APP_TITLE = "Enhanced Live Face Recognition (Streamlit + WebRTC, OpenCV LBPH)"
 DATA_DIR = Path("data")
 MODELS_DIR = Path("models")
 DATA_DIR.mkdir(exist_ok=True)
@@ -47,8 +50,15 @@ def collect_dataset_stats() -> Dict[str, int]:
             stats[person_dir.name] = len(list(person_dir.glob("*.jpg"))) + len(list(person_dir.glob("*.png")))
     return stats
 
+def rotate_image(image: np.ndarray, angle: float) -> np.ndarray:
+    (h, w) = image.shape[:2]
+    center = (w // 2, h // 2)
+    M = cv2.getRotationMatrix2D(center, angle, 1.0)
+    rotated = cv2.warpAffine(image, M, (w, h), flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    return rotated
+
 def process_image(img_path: Path, label: int) -> List[Tuple[np.ndarray, int]]:
-    """Process a single image with augmentation."""
+    """Process a single image with augmentation (flips and rotations)."""
     img = cv2.imdecode(np.fromfile(str(img_path), dtype=np.uint8), cv2.IMREAD_COLOR)
     if img is None:
         return []
@@ -61,8 +71,12 @@ def process_image(img_path: Path, label: int) -> List[Tuple[np.ndarray, int]]:
     roi = gray[y : y + h, x : x + w]
     try:
         roi = cv2.resize(roi, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
-        roi_flipped = cv2.flip(roi, 1)
-        return [(roi, label), (roi_flipped, label)]
+        results = [(roi, label), (cv2.flip(roi, 1), label)]
+        for angle in [-10, 10]:
+            rot = rotate_image(roi, angle)
+            results.append((rot, label))
+            results.append((cv2.flip(rot, 1), label))
+        return results
     except Exception:
         return []
 
@@ -130,7 +144,7 @@ def sanitize_name(name: str) -> str:
 # ---------- Streamlit UI ----------
 st.set_page_config(page_title=APP_TITLE, page_icon="🎥", layout="wide")
 st.title(APP_TITLE)
-st.caption("No Pi? No problem. Enroll faces, train LBPH, and run LIVE recognition in your browser. Optimized for speed and accuracy.")
+st.caption("Enhanced for final year project: Added data augmentation (rotations), model evaluation with confusion matrix, FPS display, and improved debugging.")
 
 with st.sidebar:
     st.header("Controls")
@@ -139,10 +153,18 @@ with st.sidebar:
     scale_factor = st.slider("Detection scale factor (lower=more sensitive)", 1.05, 1.5, 1.2, 0.05)
     min_neighbors = st.slider("Min neighbors for detection", 3, 10, 6, 1)
     st.markdown("---")
+    st.subheader("Model Status")
+    if MODEL_PATH.exists():
+        labels = load_labels()
+        st.write(f"Trained Classes: {len(labels)}")
+        st.json(labels)
+    else:
+        st.info("No model trained yet.")
+    st.markdown("---")
     st.subheader("Project Folders")
     st.code(f"DATA_DIR: {DATA_DIR.resolve()}\nMODELS_DIR: {MODELS_DIR.resolve()}", language="bash")
 
-tabs = st.tabs(["📇 Enroll", "🧠 Train", "🔴 Live Recognition"])
+tabs = st.tabs(["📇 Enroll", "🧠 Train", "📊 Evaluate", "🔴 Live Recognition"])
 
 # --------- ENROLL TAB ---------
 with tabs[0]:
@@ -180,7 +202,7 @@ with tabs[0]:
                     if ok:
                         buf.tofile(str(file_path))
                         st.success(f"Saved capture for {person_name} → {file_path.name}")
-                        st.image(img_bytes, caption="Captured Image (Face Detected)", use_container_width=True)
+                        st.image(img_bytes, caption="Captured Image (Face Detected)", use_column_width=True)
         elif cam_img and not sanitized_name:
             st.warning("Please enter a valid person name before capturing.")
 
@@ -215,7 +237,7 @@ with tabs[0]:
             if saved > 0:
                 st.success(f"Saved {saved} image(s) for {person_name}.")
                 for prev in previews:
-                    st.image(prev, caption="Uploaded Image (Face Detected)", use_container_width=True)
+                    st.image(prev, caption="Uploaded Image (Face Detected)", use_column_width=True)
 
     st.markdown("### Current dataset")
     stats = collect_dataset_stats()
@@ -235,7 +257,7 @@ with tabs[0]:
 # --------- TRAIN TAB ---------
 with tabs[1]:
     st.subheader("Train LBPH model")
-    st.write("After enrolling images, click **Train** to build/update the model. Uses parallel processing for faster training.")
+    st.write("After enrolling images, click **Train** to build/update the model. Uses parallel processing and augmented data (flips + rotations) for better accuracy.")
     if st.button("Train / Retrain"):
         with st.spinner("Training model..."):
             try:
@@ -249,10 +271,98 @@ with tabs[1]:
         st.markdown("#### Current labels")
         st.json(load_labels())
 
-# --------- LIVE RECOGNITION TAB ---------
+# --------- EVALUATE TAB ---------
 with tabs[2]:
+    st.subheader("Evaluate Model Performance")
+    st.write("Splits dataset into 80% train / 20% test, trains a temporary model, and computes accuracy and confusion matrix.")
+    if st.button("Run Evaluation"):
+        with st.spinner("Evaluating model..."):
+            try:
+                # Prepare data without augmentation for fair evaluation
+                all_rois = []
+                all_labels = []
+                label_map: Dict[int, str] = {}
+                next_label = 0
+
+                for person_dir in sorted(DATA_DIR.glob("*")):
+                    if not person_dir.is_dir():
+                        continue
+                    person_name = person_dir.name
+                    label_map[next_label] = person_name
+
+                    for img_path in person_dir.glob("*"):
+                        if img_path.suffix.lower() not in [".jpg", ".jpeg", ".png", ".bmp", ".webp"]:
+                            continue
+                        img = cv2.imdecode(np.fromfile(str(img_path), dtype=np.uint8), cv2.IMREAD_COLOR)
+                        if img is None:
+                            continue
+                        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                        gray = cv2.equalizeHist(gray)
+                        faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(50, 50))
+                        if len(faces) == 0:
+                            continue
+                        x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
+                        roi = gray[y : y + h, x : x + w]
+                        try:
+                            roi = cv2.resize(roi, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
+                            all_rois.append(roi)
+                            all_labels.append(next_label)
+                        except Exception:
+                            continue
+
+                    next_label += 1
+
+                if len(all_rois) < 10 or len(set(all_labels)) < 2:
+                    raise RuntimeError("Not enough data for evaluation. Need at least 10 images across 2+ persons.")
+
+                # Shuffle and split
+                data = list(zip(all_rois, all_labels))
+                random.shuffle(data)
+                rois, labels = zip(*data)
+                rois = list(rois)
+                labels = list(labels)
+                split_idx = int(0.8 * len(rois))
+                train_rois = rois[:split_idx]
+                train_labels = labels[:split_idx]
+                test_rois = rois[split_idx:]
+                test_labels = labels[split_idx:]
+
+                # Train temporary model (without augmentation for evaluation)
+                eval_recognizer = cv2.face.LBPHFaceRecognizer_create(
+                    radius=LBPH_RADIUS, neighbors=LBPH_NEIGHBORS, grid_x=LBPH_GRID_X, grid_y=LBPH_GRID_Y
+                )
+                eval_recognizer.train(train_rois, np.array(train_labels, dtype=np.int32))
+
+                # Predict on test
+                predictions = []
+                confidences = []
+                for roi in test_rois:
+                    pred, conf = eval_recognizer.predict(roi)
+                    predictions.append(pred)
+                    confidences.append(conf)
+
+                # Compute accuracy (considering only correct predictions, ignoring threshold for pure accuracy)
+                correct = sum(p == t for p, t in zip(predictions, test_labels))
+                accuracy = correct / len(test_labels) * 100
+                st.success(f"Test Accuracy: {accuracy:.2f}% (on {len(test_labels)} test samples)")
+
+                # Confusion matrix
+                classes = sorted(label_map.keys())
+                cm = np.zeros((len(classes), len(classes)), dtype=int)
+                for p, t in zip(predictions, test_labels):
+                    cm[t, p] += 1
+                class_names = [label_map[c] for c in classes]
+                df_cm = pd.DataFrame(cm, index=class_names, columns=class_names)
+                st.subheader("Confusion Matrix")
+                st.dataframe(df_cm)
+
+            except Exception as e:
+                st.error(str(e))
+
+# --------- LIVE RECOGNITION TAB ---------
+with tabs[3]:
     st.subheader("Start live webcam recognition")
-    st.write("Click **Start** below and allow camera access. Optimized detection parameters.")
+    st.write("Click **Start** below and allow camera access. Optimized detection parameters with FPS display.")
 
     recognizer, id_to_name = load_model()
     if recognizer is None or not id_to_name:
@@ -267,10 +377,17 @@ with tabs[2]:
                 self.frame_count = 0
                 self.last_faces = []
                 self.skip_frames = 2
+                self.prev_time = time.time()
 
             def recv(self, frame: av.VideoFrame) -> av.VideoFrame:
                 img = frame.to_ndarray(format="bgr24")
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+                # FPS calculation
+                curr_time = time.time()
+                fps = 1 / (curr_time - self.prev_time) if self.prev_time else 0
+                self.prev_time = curr_time
+                draw_label(img, f"FPS: {fps:.1f}", 10, 30)
 
                 self.frame_count += 1
                 if self.frame_count % self.skip_frames == 0:
@@ -338,4 +455,4 @@ with tabs[2]:
         )
 
 st.markdown("---")
-st.caption("Tip: Capture at least 10–20 varied images per person (different lighting/angles/expressions) before training. Optimized with histogram equalization, augmentation, and parallel loading.")
+st.caption("Enhancements: Added rotations in augmentation for robustness, evaluation tab with accuracy and confusion matrix, FPS in live view. Tip: Capture 20+ varied images per person (angles, lighting) for best results.")
