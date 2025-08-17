@@ -49,7 +49,7 @@ LBPH_GRID_Y = 8
 FACE_RESIZE = (200, 200)
 
 # Minimum photos required per person
-MIN_PHOTOS_PER_PERSON = 1
+MIN_PHOTOS_PER_PERSON = 2
 MIN_FACE_SIZE = 100
 
 def load_labels() -> Dict[int, str]:
@@ -123,10 +123,14 @@ def process_image(img_path: Path, label: int) -> List[Tuple[np.ndarray, int]]:
         gray = cv2.equalizeHist(gray)
         faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.01, minNeighbors=1, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
         if len(faces) == 0:
-            logger.info(f"No faces detected in {img_path}; using whole image as ROI")
-            roi = cv2.resize(gray, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
-            augmented_rois = advanced_augment(roi)
-            return [(aug_roi, label) for aug_roi in augmented_rois]
+            # Fallback: Assume small images are already cropped faces
+            if gray.shape[0] < 300 and gray.shape[1] < 300:
+                logger.info(f"No faces detected in {img_path}; assuming cropped face")
+                roi = cv2.resize(gray, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
+                augmented_rois = advanced_augment(roi)
+                return [(aug_roi, label) for aug_roi in augmented_rois]
+            logger.warning(f"No faces detected in {img_path}")
+            return []
         x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
         if w < MIN_FACE_SIZE or h < MIN_FACE_SIZE:
             logger.warning(f"Face too small in {img_path}: {w}x{h}")
@@ -150,6 +154,7 @@ def prepare_training_data() -> Tuple[List[np.ndarray], List[int], Dict[int, str]
     stats = collect_dataset_stats()
     for person_name, count in stats.items():
         if count < MIN_PHOTOS_PER_PERSON:
+            logger.warning(f"Person '{person_name}' has only {count} photos. Minimum required: {MIN_PHOTOS_PER_PERSON}.")
             raise RuntimeError(f"Person '{person_name}' has only {count} photos. Minimum required: {MIN_PHOTOS_PER_PERSON}.")
 
     with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
@@ -159,20 +164,29 @@ def prepare_training_data() -> Tuple[List[np.ndarray], List[int], Dict[int, str]
                 continue
             person_name = person_dir.name
             label_map[next_label] = person_name
+            valid_images = 0
             for img_path in person_dir.glob("*"):
                 if img_path.suffix.lower() not in [".jpg", ".jpeg", ".png", ".bmp", ".webp"]:
+                    logger.warning(f"Skipping invalid file format: {img_path}")
                     continue
                 futures.append(executor.submit(process_image, img_path, next_label))
+                valid_images += 1
+            if valid_images == 0:
+                logger.warning(f"No valid images for {person_name}")
             next_label += 1
 
         for future in futures:
             results = future.result()
+            if not results:
+                logger.warning("No valid faces from processed image")
+                continue
             for img_roi, label in results:
                 images.append(img_roi)
                 labels.append(label)
 
     if len(images) == 0 or len(set(labels)) == 0:
-        raise RuntimeError("Not enough valid faces detected for training. Ensure images contain clear, large faces.")
+        logger.error("No valid faces detected for training")
+        raise RuntimeError("No valid faces detected for training. Ensure images contain clear, large faces.")
     
     logger.info(f"Prepared training data: {len(images)} images, {len(set(labels))} classes")
     return images, labels, label_map
@@ -254,17 +268,15 @@ with st.sidebar:
         with open(log_file, "rb") as f:
             st.download_button("Download Logs", f, file_name="face_recognition.log")
     st.markdown("---")
-    st.info(f"Supports training with {MIN_PHOTOS_PER_PERSON} photo(s) per person via enhanced augmentation.")
-
-tabs = st.tabs(["📇 Enroll", "🧠 Train", "🔴 Live Recognition"])
+    st.info(f"Requires {MIN_PHOTOS_PER_PERSON} photo(s) per person for training.")
 
 # --------- ENROLL TAB ---------
 with tabs[0]:
     st.subheader("Enroll a Person")
     person_name = st.text_input("Person name", placeholder="e.g., Abhinav")
     sanitized_name = sanitize_name(person_name) if person_name else ""
-    st.write(f"Capture via webcam, live video, or upload at least {MIN_PHOTOS_PER_PERSON} photo(s) for {person_name or 'a person'}. Augmentation enables single-photo training.")
-    st.info("Tips: Ensure good lighting, face the camera directly, and keep your face close. Use webcam capture or live video snapshots for real-time enrollment.")
+    st.write(f"Capture via webcam, live video, or upload at least {MIN_PHOTOS_PER_PERSON} photo(s) for {person_name or 'a person'}.")
+    st.info("Tips: Ensure good lighting, face the camera directly, and keep your face close. Wait 2 seconds between captures.")
 
     if sanitized_name:
         person_dir = DATA_DIR / sanitized_name
@@ -273,58 +285,80 @@ with tabs[0]:
             st.session_state.captured_count = 0
         if "snapshot_trigger" not in st.session_state:
             st.session_state.snapshot_trigger = False
+        if "capture_key" not in st.session_state:
+            st.session_state.capture_key = random.randint(1, 10000)
+        if "last_capture_time" not in st.session_state:
+            st.session_state.last_capture_time = 0
+        if "show_camera" not in st.session_state:
+            st.session_state.show_camera = False
 
         stats = collect_dataset_stats()
         current_count = stats.get(sanitized_name, 0)
-        progress_bar = st.progress(min(current_count / MIN_PHOTOS_PER_PERSON, 1.0))  # Fix: Clamp progress value
+        progress_bar = st.progress(min(current_count / MIN_PHOTOS_PER_PERSON, 1.0))
         status_text = st.empty()
         status_text.write(f"Progress: {current_count}/{MIN_PHOTOS_PER_PERSON} photos captured for {person_name}")
 
         col1, col2 = st.columns(2)
 
-        # Webcam Capture (from second code)
+        # Webcam Capture
         with col1:
-            cam_img = st.camera_input("Capture image")
-            if cam_img and sanitized_name:
-                img_bytes = cam_img.getvalue()
-                img_array = np.frombuffer(img_bytes, dtype=np.uint8)
-                img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-                if img is None:
-                    st.error("Failed to decode image. Try again.")
-                    logger.error("Failed to decode webcam capture")
+            if st.button("Start Webcam Capture"):
+                st.session_state.show_camera = True
+                st.session_state.capture_key = random.randint(1, 10000)
+                rerun()
+
+            if st.session_state.show_camera:
+                if time.time() - st.session_state.last_capture_time < 2:
+                    st.write(f"Waiting for next capture... ({int(2 - (time.time() - st.session_state.last_capture_time))}s)")
                 else:
-                    img = cv2.resize(img, (1280, 720), interpolation=cv2.INTER_LINEAR)
-                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                    gray = cv2.equalizeHist(gray)
-                    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=4, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
-                    st.write(f"Debug: Image resolution: {img.shape[1]}x{img.shape[0]}, Faces: {len(faces)}")
-                    if len(faces) == 0:
-                        st.warning("No face detected. Adjust lighting or position.")
-                        logger.warning("No face detected in webcam capture")
-                    else:
-                        x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
-                        if w * h < MIN_FACE_SIZE * MIN_FACE_SIZE:
-                            st.warning("Face too small. Move closer to the camera.")
-                            logger.warning("Face too small in webcam capture")
+                    cam_img = st.camera_input("Capture image", key=f"cam_{st.session_state.capture_key}")
+                    if cam_img:
+                        img_bytes = cam_img.getvalue()
+                        img_array = np.frombuffer(img_bytes, dtype=np.uint8)
+                        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                        if img is None:
+                            st.error("Failed to decode image. Try again.")
+                            logger.error("Failed to decode webcam capture")
                         else:
-                            roi = img[y:y+h, x:x+w]
-                            file_path = person_dir / f"{uuid.uuid4().hex}.jpg"
-                            cv2.imwrite(str(file_path), roi)
-                            st.session_state.captured_count += 1
-                            st.success(f"Saved capture {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} for {person_name}")
-                            st.image(img_bytes, caption="Captured Image", use_column_width=True)
-                            logger.info(f"Saved webcam capture for {person_name}: {file_path.name}")
-                            progress_bar.progress(min(st.session_state.captured_count / MIN_PHOTOS_PER_PERSON, 1.0))
-                            status_text.write(f"Progress: {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} photos captured for {person_name}")
-                            if st.session_state.captured_count >= MIN_PHOTOS_PER_PERSON:
-                                status_text.success(f"Completed capturing {MIN_PHOTOS_PER_PERSON} photo(s) for {person_name}! Ready to train.")
-                            rerun()
-            elif cam_img and not sanitized_name:
-                st.warning("Please enter a valid person name before capturing.")
+                            img = cv2.resize(img, (1280, 720), interpolation=cv2.INTER_LINEAR)
+                            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                            gray = cv2.equalizeHist(gray)
+                            faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.01, minNeighbors=1, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
+                            st.write(f"Debug: Image resolution: {img.shape[1]}x{img.shape[0]}, Faces: {len(faces)}")
+                            if len(faces) == 0:
+                                st.warning("No face detected. Adjust lighting or position.")
+                                logger.warning("No face detected in webcam capture")
+                            else:
+                                x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
+                                if w * h < MIN_FACE_SIZE * MIN_FACE_SIZE:
+                                    st.warning("Face too small. Move closer to the camera.")
+                                    logger.warning("Face too small in webcam capture")
+                                else:
+                                    roi = img[y:y+h, x:x+w]
+                                    file_path = person_dir / f"{uuid.uuid4().hex}.jpg"
+                                    cv2.imwrite(str(file_path), roi)
+                                    st.session_state.captured_count += 1
+                                    st.session_state.last_capture_time = time.time()
+                                    st.success(f"Saved capture {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} for {person_name}")
+                                    st.image(img_bytes, caption="Captured Image", use_column_width=True)
+                                    logger.info(f"Saved webcam capture for {person_name}: {file_path.name}")
+                                    progress_bar.progress(min(st.session_state.captured_count / MIN_PHOTOS_PER_PERSON, 1.0))
+                                    status_text.write(f"Progress: {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} photos captured for {person_name}")
+                                    st.session_state.show_camera = False  # Hide camera after capture
+                                    st.session_state.capture_key = random.randint(1, 10000)  # Reset key
+                                    if st.session_state.captured_count >= MIN_PHOTOS_PER_PERSON:
+                                        status_text.success(f"Completed capturing {MIN_PHOTOS_PER_PERSON} photo(s) for {person_name}! Ready to train.")
+                                    rerun()
+
+            if st.session_state.show_camera and st.button("Stop Webcam Capture"):
+                st.session_state.show_camera = False
+                st.session_state.last_capture_time = time.time()
+                status_text.write(f"Capture stopped. Captured {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} photos for {person_name}")
+                logger.info(f"Webcam capture stopped for {person_name}: {st.session_state.captured_count} photos")
+                rerun()
 
         # File Upload and Live Video Snapshot
         with col2:
-            # File Uploader
             uploaded_files = st.file_uploader("Upload photos", type=["jpg", "png", "jpeg"], accept_multiple_files=True)
             if uploaded_files:
                 for uploaded_file in uploaded_files:
@@ -334,7 +368,7 @@ with tabs[0]:
                     if img is not None:
                         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                         gray = cv2.equalizeHist(gray)
-                        faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
+                        faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.01, minNeighbors=1, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
                         if len(faces) > 0:
                             x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
                             roi = img[y:y+h, x:x+w]
@@ -348,7 +382,6 @@ with tabs[0]:
                         st.error(f"Failed to decode uploaded {uploaded_file.name}.")
                 rerun()
 
-            # Live Video Capture with Snapshot
             st.subheader("Live Video Capture")
             if st.button("Capture Snapshot"):
                 st.session_state.snapshot_trigger = True
@@ -361,7 +394,7 @@ with tabs[0]:
                     img = frame.to_ndarray(format="bgr24")
                     self.last_frame = img
                     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
+                    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.01, minNeighbors=1, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
                     for (x, y, w, h) in faces:
                         cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 2)
                         draw_label(img, f"Face: {w}x{h}", x, y)
@@ -387,7 +420,7 @@ with tabs[0]:
                 img = ctx.video_processor.last_frame
                 gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
                 gray = cv2.equalizeHist(gray)
-                faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
+                faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.01, minNeighbors=1, minSize=(MIN_FACE_SIZE, MIN_FACE_SIZE))
                 if len(faces) == 0:
                     st.warning("No face detected in snapshot. Adjust lighting or position.")
                     logger.warning("No face detected in snapshot")
@@ -415,6 +448,27 @@ with tabs[0]:
             st.success(f"Completed capturing {MIN_PHOTOS_PER_PERSON} photo(s) for {person_name}! Ready to train.")
             progress_bar.progress(1.0)
 
+        if st.button("Clear Captures"):
+            st.session_state.captured_count = 0
+            st.session_state.show_camera = False
+            st.session_state.snapshot_trigger = False
+            status_text.write(f"Cleared captures for {person_name}. Start over.")
+            logger.info(f"Cleared captures for {person_name}")
+            rerun()
+
+        # Display Captured Images
+        st.markdown("### Captured Images")
+        image_files = list(person_dir.glob("*.jpg")) + list(person_dir.glob("*.png"))
+        if image_files:
+            cols = st.columns(3)
+            for i, img_path in enumerate(image_files):
+                img = cv2.imread(str(img_path))
+                if img is not None:
+                    img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                    cols[i % 3].image(img_rgb, caption=img_path.name, use_column_width=True)
+        else:
+            st.info("No images captured yet.")
+
     else:
         st.warning("Enter a person name to start capturing.")
 
@@ -433,6 +487,8 @@ with tabs[0]:
             st.success(f"Deleted dataset for {delete_person}.")
             logger.info(f"Deleted dataset for {delete_person}")
             st.session_state.captured_count = 0
+            st.session_state.show_camera = False
+            st.session_state.snapshot_trigger = False
             rerun()
 
 # --------- TRAIN TAB ---------
@@ -446,9 +502,11 @@ with tabs[1]:
                 st.success(f"Training complete. Classes: {n_classes}. Model saved to `{MODEL_PATH}`.")
                 st.json(stats)
             except RuntimeError as e:
-                st.error(f"Training failed: {e}. Check logs for details (e.g., no valid faces detected). Try uploading clearer, larger face images.")
+                st.error(f"Training failed: {e}. Check logs for details. Try capturing clearer, larger face images.")
+                logger.error(f"Training failed: {e}")
             except Exception as e:
                 st.error(f"Unexpected error: {str(e)}. See logs for details.")
+                logger.error(f"Unexpected training error: {e}")
 
     if LABELS_PATH.exists():
         st.markdown("#### Current Labels")
