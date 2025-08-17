@@ -9,7 +9,9 @@ import numpy as np
 import streamlit as st
 from concurrent.futures import ThreadPoolExecutor
 import random
+import time
 import pandas as pd
+from streamlit import rerun
 
 # Setup logging
 logging.basicConfig(
@@ -195,7 +197,7 @@ def sanitize_name(name: str) -> str:
 # ---------- Streamlit UI ----------
 st.set_page_config(page_title=APP_TITLE, page_icon="🎥", layout="wide")
 st.title(APP_TITLE)
-st.caption(f"Face recognition requiring exactly {MIN_PHOTOS_PER_PERSON} photos per person during enrollment. Optimized for Streamlit.")
+st.caption(f"Semi-autonomous capture of exactly {MIN_PHOTOS_PER_PERSON} photos per person. Optimized for Streamlit.")
 
 with st.sidebar:
     st.header("Controls")
@@ -230,8 +232,8 @@ with tabs[0]:
     st.subheader("Enroll a Person")
     person_name = st.text_input("Person name", placeholder="e.g., Abhinav")
     sanitized_name = sanitize_name(person_name) if person_name else ""
-    st.write(f"You must capture exactly {MIN_PHOTOS_PER_PERSON} photos with detected faces for {person_name or 'a person'}.")
-    st.info("Tips: Ensure good lighting, face the camera directly, vary poses slightly. Click 'Capture Image' for each photo.")
+    st.write(f"Capture exactly {MIN_PHOTOS_PER_PERSON} photos with detected faces for {person_name or 'a person'}.")
+    st.info("Tips: Click 'Start Capture' once, then face the camera and vary poses slightly. Photos are processed automatically every ~2 seconds.")
 
     if sanitized_name:
         person_dir = DATA_DIR / sanitized_name
@@ -240,48 +242,80 @@ with tabs[0]:
             st.session_state.captured_count = 0
         if "capture_key" not in st.session_state:
             st.session_state.capture_key = 0
+        if "capture_active" not in st.session_state:
+            st.session_state.capture_active = False
+        if "last_capture_time" not in st.session_state:
+            st.session_state.last_capture_time = 0
 
         stats = collect_dataset_stats()
         current_count = stats.get(sanitized_name, 0)
-        st.write(f"Progress: {current_count}/{MIN_PHOTOS_PER_PERSON} photos captured for {person_name}")
         progress_bar = st.progress(current_count / MIN_PHOTOS_PER_PERSON)
+        status_text = st.empty()
+        status_text.write(f"Progress: {current_count}/{MIN_PHOTOS_PER_PERSON} photos captured for {person_name}")
 
         if current_count < MIN_PHOTOS_PER_PERSON:
-            cam_img = st.camera_input("Capture image", key=f"cam_{st.session_state.capture_key}")
-            if cam_img:
-                img_bytes = cam_img.getvalue()
-                img_array = np.frombuffer(img_bytes, dtype=np.uint8)
-                img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-                if img is None:
-                    st.error("Failed to decode image. Try again.")
-                    logger.error("Failed to decode webcam capture")
+            if st.button("Start Capture", disabled=st.session_state.capture_active):
+                st.session_state.capture_active = True
+                st.session_state.captured_count = current_count
+                st.session_state.last_capture_time = time.time()
+                st.session_state.capture_key = random.randint(1, 10000)  # Random key to force widget reset
+                logger.info(f"Started capture for {person_name}")
+
+            if st.session_state.capture_active:
+                if time.time() - st.session_state.last_capture_time < 2:  # 2-second delay
+                    st.write(f"Waiting for next capture... ({int(2 - (time.time() - st.session_state.last_capture_time))}s)")
                 else:
-                    img = cv2.resize(img, (640, 480), interpolation=cv2.INTER_LINEAR)
-                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                    gray = cv2.equalizeHist(gray)
-                    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(50, 50))
-                    st.write(f"Debug: Image resolution: {img.shape[1]}x{img.shape[0]}, Faces: {len(faces)}")
-                    if len(faces) == 0:
-                        st.warning("No face detected. Adjust lighting or position.")
-                        logger.warning("No face detected in webcam capture")
-                    else:
-                        x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
-                        if w * h < 2500:
-                            st.warning("Face too small. Move closer to the camera.")
-                            logger.warning("Face too small in webcam capture")
+                    cam_img = st.camera_input("Capture image", key=f"cam_{st.session_state.capture_key}")
+                    if cam_img:
+                        img_bytes = cam_img.getvalue()
+                        img_array = np.frombuffer(img_bytes, dtype=np.uint8)
+                        img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
+                        if img is None:
+                            st.error("Failed to decode image. Try again.")
+                            logger.error("Failed to decode webcam capture")
                         else:
-                            roi = img[y:y+h, x:x+w]
-                            file_path = person_dir / f"{uuid.uuid4().hex}.jpg"
-                            cv2.imwrite(str(file_path), roi)
-                            st.session_state.captured_count += 1
-                            st.success(f"Saved capture {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} for {person_name}")
-                            st.image(img_bytes, caption="Captured Image", use_column_width=True)
-                            logger.info(f"Saved webcam capture for {person_name}: {file_path.name}")
-                            st.session_state.capture_key += 1  # Change key to reset camera_input
-                            st.rerun()  # Refresh to update progress
+                            img = cv2.resize(img, (640, 480), interpolation=cv2.INTER_LINEAR)
+                            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+                            gray = cv2.equalizeHist(gray)
+                            faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(50, 50))
+                            st.write(f"Debug: Image resolution: {img.shape[1]}x{img.shape[0]}, Faces: {len(faces)}")
+                            if len(faces) == 0:
+                                st.warning("No face detected. Adjust lighting or position.")
+                                logger.warning("No face detected in webcam capture")
+                            else:
+                                x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
+                                if w * h < 2500:
+                                    st.warning("Face too small. Move closer to the camera.")
+                                    logger.warning("Face too small in webcam capture")
+                                else:
+                                    roi = img[y:y+h, x:x+w]
+                                    file_path = person_dir / f"{uuid.uuid4().hex}.jpg"
+                                    cv2.imwrite(str(file_path), roi)
+                                    st.session_state.captured_count += 1
+                                    st.session_state.last_capture_time = time.time()
+                                    st.success(f"Saved capture {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} for {person_name}")
+                                    st.image(img_bytes, caption="Captured Image", use_column_width=True)
+                                    logger.info(f"Saved webcam capture for {person_name}: {file_path.name}")
+                                    progress_bar.progress(st.session_state.captured_count / MIN_PHOTOS_PER_PERSON)
+                                    status_text.write(f"Progress: {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} photos captured for {person_name}")
+                                    if st.session_state.captured_count >= MIN_PHOTOS_PER_PERSON:
+                                        st.session_state.capture_active = False
+                                        status_text.success(f"Completed capturing {MIN_PHOTOS_PER_PERSON} photos for {person_name}! Ready to train.")
+                                        logger.info(f"Capture completed for {person_name}: {MIN_PHOTOS_PER_PERSON} photos")
+                                    else:
+                                        st.session_state.capture_key = random.randint(1, 10000)  # Reset widget
+                                        rerun()  # Refresh to trigger next capture
         else:
             st.success(f"Completed capturing {MIN_PHOTOS_PER_PERSON} photos for {person_name}! Ready to train.")
             progress_bar.progress(1.0)
+            st.session_state.capture_active = False
+
+        if st.session_state.capture_active and st.button("Stop Capture"):
+            st.session_state.capture_active = False
+            status_text.write(f"Capture stopped. Captured {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} photos for {person_name}")
+            logger.info(f"Capture stopped for {person_name}: {st.session_state.captured_count} photos")
+            rerun()
+
     else:
         st.warning("Enter a person name to start capturing.")
 
@@ -309,7 +343,7 @@ with tabs[0]:
             for prev in previews:
                 st.image(prev, caption="Uploaded Image", use_column_width=True)
             logger.info(f"Saved {saved} uploaded images for {person_name}")
-            st.rerun()
+            rerun()
         else:
             logger.warning("No valid images saved from uploads")
 
@@ -360,7 +394,8 @@ with tabs[0]:
             st.success(f"Deleted dataset for {delete_person}.")
             logger.info(f"Deleted dataset for {delete_person}")
             st.session_state.captured_count = 0
-            st.rerun()
+            st.session_state.capture_active = False
+            rerun()
 
 # --------- TRAIN TAB ---------
 with tabs[1]:
@@ -484,4 +519,4 @@ with tabs[2]:
             logger.error(f"WebRTC initialization failed: {e}")
 
 st.markdown("---")
-st.caption(f"Fixes: Replaced auto-capture with enforced manual capture of exactly {MIN_PHOTOS_PER_PERSON} photos using camera_input, ensuring Streamlit compatibility and reliable face detection.")
+st.caption(f"Fixes: Semi-autonomous capture requiring one click to start, automatically processing {MIN_PHOTOS_PER_PERSON} photos with face detection every ~2 seconds.")
