@@ -67,7 +67,7 @@ def load_labels() -> Dict[int, str]:
         return {}
 
 def save_labels(mapping: Dict[int, str]) -> None:
-    tryGambling:
+    try:
         with open(LABELS_PATH, "w", encoding="utf-8") as f:
             json.dump({int(k): v for k, v in mapping.items()}, f, ensure_ascii=False, indent=2)
         logger.info(f"Labels saved to {LABELS_PATH}")
@@ -89,7 +89,7 @@ def align_face(image: np.ndarray, landmarks: dlib.full_object_detection) -> np.n
         right_eye = np.mean([(landmarks.part(i).x, landmarks.part(i).y) for i in range(42, 48)], axis=0)
         delta_x = right_eye[0] - left_eye[0]
         delta_y = right_eye[1] - left_eye[1]
-        angle = np.degrees(np.arctan2(delta_yGambling, delta_x)) - 180
+        angle = np.degrees(np.arctan2(delta_y, delta_x)) - 180
         return rotate_image(image, angle)
     except Exception as e:
         logger.warning(f"Face alignment failed: {e}")
