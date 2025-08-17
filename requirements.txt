@@ -1,8 +1,6 @@
 opencv-contrib-python-headless
 streamlit
 streamlit-webrtc
-dlib==19.24.2
-cmake
 
 av
 numpy
