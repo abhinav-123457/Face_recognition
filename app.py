@@ -12,6 +12,7 @@ import random
 import time
 import pandas as pd
 from streamlit import rerun
+import imgaug.augmenters as iaa
 
 # Setup logging
 logging.basicConfig(
@@ -24,7 +25,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-APP_TITLE = "Streamlit Face Recognition (OpenCV LBPH)"
+APP_TITLE = "Streamlit Face Recognition (OpenCV LBPH - Single Photo Support)"
 DATA_DIR = Path("data")
 MODELS_DIR = Path("models")
 LOGS_DIR = Path("logs")
@@ -45,8 +46,8 @@ LBPH_GRID_X = 6
 LBPH_GRID_Y = 6
 FACE_RESIZE = (200, 200)
 
-# Minimum photos required per person
-MIN_PHOTOS_PER_PERSON = 20
+# Minimum photos required per person - set to 1 for single photo support
+MIN_PHOTOS_PER_PERSON = 1
 
 def load_labels() -> Dict[int, str]:
     try:
@@ -86,6 +87,27 @@ def rotate_image(image: np.ndarray, angle: float) -> np.ndarray:
         logger.error(f"Error rotating image: {e}")
         return image
 
+def advanced_augment(roi: np.ndarray) -> List[np.ndarray]:
+    """Advanced augmentation for single photo: rotations, flips, brightness, contrast, noise."""
+    aug_images = [roi, cv2.flip(roi, 1)]
+    angles = [-15, -10, -5, 5, 10, 15]
+    for angle in angles:
+        rot = rotate_image(roi, angle)
+        aug_images.append(rot)
+        aug_images.append(cv2.flip(rot, 1))
+
+    # Brightness and contrast
+    seq_brightness = iaa.Sequential([iaa.AddToBrightness((-30, 30))])
+    seq_contrast = iaa.Sequential([iaa.ContrastNormalization((0.8, 1.2))])
+    seq_noise = iaa.Sequential([iaa.AdditiveGaussianNoise(scale=(0, 0.05 * 255))])
+
+    for aug in [seq_brightness, seq_contrast, seq_noise]:
+        augmented = aug(image=roi)
+        aug_images.append(augmented)
+        aug_images.append(cv2.flip(augmented, 1))
+
+    return aug_images
+
 def process_image(img_path: Path, label: int) -> List[Tuple[np.ndarray, int]]:
     try:
         img = cv2.imdecode(np.fromfile(str(img_path), dtype=np.uint8), cv2.IMREAD_COLOR)
@@ -101,18 +123,15 @@ def process_image(img_path: Path, label: int) -> List[Tuple[np.ndarray, int]]:
         x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
         roi = gray[y:y+h, x:x+w]
         roi = cv2.resize(roi, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
-        results = [(roi, label), (cv2.flip(roi, 1), label)]
-        for angle in [-10, 10]:
-            rot = rotate_image(roi, angle)
-            results.append((rot, label))
-            results.append((cv2.flip(rot, 1), label))
+        augmented_rois = advanced_augment(roi)
+        results = [(aug_roi, label) for aug_roi in augmented_rois]
         logger.info(f"Processed image {img_path} with {len(results)} augmentations")
         return results
     except Exception as e:
         logger.error(f"Error processing image {img_path}: {e}")
         return []
 
-def prepare_training_data() -> Tuple[List[np.ndarray], List[int], Dict[int, str]]:
+def prepare_training_data() -> Tuple[List[np.ndarray], List[int], Dict[int, str]:
     images = []
     labels = []
     label_map: Dict[int, str] = {}
@@ -197,7 +216,7 @@ def sanitize_name(name: str) -> str:
 # ---------- Streamlit UI ----------
 st.set_page_config(page_title=APP_TITLE, page_icon="🎥", layout="wide")
 st.title(APP_TITLE)
-st.caption(f"Semi-autonomous capture of exactly {MIN_PHOTOS_PER_PERSON} photos per person. Optimized for Streamlit.")
+st.caption(f"Supports training with 1-2 photos via advanced augmentation. Semi-autonomous capture available.")
 
 with st.sidebar:
     st.header("Controls")
@@ -223,7 +242,7 @@ with st.sidebar:
         with open(log_file, "rb") as f:
             st.download_button("Download Logs", f, file_name="face_recognition.log")
     st.markdown("---")
-    st.info(f"Must capture exactly {MIN_PHOTOS_PER_PERSON} photos per person.")
+    st.info(f"Supports training with {MIN_PHOTOS_PER_PERSON} photo(s) per person via augmentation.")
 
 tabs = st.tabs(["📇 Enroll", "🧠 Train", "🔴 Live Recognition"])
 
@@ -232,7 +251,7 @@ with tabs[0]:
     st.subheader("Enroll a Person")
     person_name = st.text_input("Person name", placeholder="e.g., Abhinav")
     sanitized_name = sanitize_name(person_name) if person_name else ""
-    st.write(f"Capture exactly {MIN_PHOTOS_PER_PERSON} photos with detected faces for {person_name or 'a person'}.")
+    st.write(f"Capture at least {MIN_PHOTOS_PER_PERSON} photo(s) for {person_name or 'a person'}. Augmentation enables single-photo training.")
     st.info("Tips: Click 'Start Capture' once, then face the camera and vary poses slightly. Photos are processed automatically every ~2 seconds.")
 
     if sanitized_name:
@@ -300,13 +319,13 @@ with tabs[0]:
                                     status_text.write(f"Progress: {st.session_state.captured_count}/{MIN_PHOTOS_PER_PERSON} photos captured for {person_name}")
                                     if st.session_state.captured_count >= MIN_PHOTOS_PER_PERSON:
                                         st.session_state.capture_active = False
-                                        status_text.success(f"Completed capturing {MIN_PHOTOS_PER_PERSON} photos for {person_name}! Ready to train.")
+                                        status_text.success(f"Completed capturing {MIN_PHOTOS_PER_PERSON} photo(s) for {person_name}! Ready to train.")
                                         logger.info(f"Capture completed for {person_name}: {MIN_PHOTOS_PER_PERSON} photos")
                                     else:
                                         st.session_state.capture_key = random.randint(1, 10000)  # Reset widget
                                         rerun()  # Refresh to trigger next capture
         else:
-            st.success(f"Completed capturing {MIN_PHOTOS_PER_PERSON} photos for {person_name}! Ready to train.")
+            st.success(f"Completed capturing {MIN_PHOTOS_PER_PERSON} photo(s) for {person_name}! Ready to train.")
             progress_bar.progress(1.0)
             st.session_state.capture_active = False
 
@@ -318,66 +337,6 @@ with tabs[0]:
 
     else:
         st.warning("Enter a person name to start capturing.")
-
-    st.markdown("### Upload Images (Optional)")
-    uploads = st.file_uploader("Upload image(s)", type=["jpg", "jpeg", "png", "bmp", "webp"], accept_multiple_files=True)
-    if uploads and sanitized_name:
-        person_dir = DATA_DIR / sanitized_name
-        ensure_dir(person_dir)
-        saved = 0
-        previews = []
-        batch_size = 10
-        for i in range(0, len(uploads), batch_size):
-            batch = uploads[i:i + batch_size]
-            with ThreadPoolExecutor(max_workers=os.cpu_count()) as executor:
-                futures = []
-                for up in batch:
-                    futures.append(executor.submit(process_upload, up, person_dir))
-                for future in futures:
-                    result = future.result()
-                    if result:
-                        saved += 1
-                        previews.append(result)
-        if saved > 0:
-            st.success(f"Saved {saved} image(s) for {person_name}.")
-            for prev in previews:
-                st.image(prev, caption="Uploaded Image", use_column_width=True)
-            logger.info(f"Saved {saved} uploaded images for {person_name}")
-            rerun()
-        else:
-            logger.warning("No valid images saved from uploads")
-
-    def process_upload(up, person_dir):
-        try:
-            img_bytes = up.getvalue()
-            img_array = np.frombuffer(img_bytes, dtype=np.uint8)
-            img = cv2.imdecode(img_array, cv2.IMREAD_COLOR)
-            if img is None:
-                st.warning(f"Failed to decode {up.name}. Skipping.")
-                logger.warning(f"Failed to decode uploaded image: {up.name}")
-                return None
-            img = cv2.resize(img, (640, 480), interpolation=cv2.INTER_LINEAR)
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-            gray = cv2.equalizeHist(gray)
-            faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.05, minNeighbors=3, minSize=(50, 50))
-            st.write(f"Debug: {up.name} resolution: {img.shape[1]}x{img.shape[0]}, Faces: {len(faces)}")
-            if len(faces) == 0:
-                st.warning(f"No face detected in {up.name}. Skipping.")
-                logger.warning(f"No face detected in uploaded image: {up.name}")
-                return None
-            x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
-            if w * h < 2500:
-                st.warning(f"Face too small in {up.name}. Skipping.")
-                logger.warning(f"Face too small in uploaded image: {up.name}")
-                return None
-            roi = img[y:y+h, x:x+w]
-            file_path = person_dir / f"{uuid.uuid4().hex}.jpg"
-            cv2.imwrite(str(file_path), roi)
-            logger.info(f"Saved uploaded image for {person_dir.name}: {file_path.name}")
-            return img_bytes
-        except Exception as e:
-            logger.error(f"Error processing upload {up.name}: {e}")
-            return None
 
     st.markdown("### Current Dataset")
     stats = collect_dataset_stats()
@@ -400,7 +359,7 @@ with tabs[0]:
 # --------- TRAIN TAB ---------
 with tabs[1]:
     st.subheader("Train LBPH Model")
-    st.write(f"Requires exactly {MIN_PHOTOS_PER_PERSON} photos per person.")
+    st.write(f"Requires at least {MIN_PHOTOS_PER_PERSON} photo(s) per person, with augmentation for single-photo support.")
     if st.button("Train / Retrain"):
         with st.spinner("Training model..."):
             try:
@@ -519,4 +478,4 @@ with tabs[2]:
             logger.error(f"WebRTC initialization failed: {e}")
 
 st.markdown("---")
-st.caption(f"Fixes: Semi-autonomous capture requiring one click to start, automatically processing {MIN_PHOTOS_PER_PERSON} photos with face detection every ~2 seconds.")
+st.caption(f"Enhancements: Supports single-photo training with advanced augmentation (rotations, flips, brightness, contrast, noise). Semi-autonomous capture for ease.")
