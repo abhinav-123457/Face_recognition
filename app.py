@@ -14,7 +14,6 @@ import random
 import time
 import pandas as pd
 from datetime import datetime
-import dlib
 
 # Setup logging
 logging.basicConfig(
@@ -37,13 +36,6 @@ LOGS_DIR.mkdir(exist_ok=True)
 
 CASCADE_PATH = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 FACE_CASCADE = cv2.CascadeClassifier(CASCADE_PATH)
-# Load dlib's facial landmark detector
-DLIB_LANDMARKS_PATH = "shape_predictor_68_face_landmarks.dat"
-LANDMARK_DETECTOR = None
-if os.path.exists(DLIB_LANDMARKS_PATH):
-    LANDMARK_DETECTOR = dlib.shape_predictor(DLIB_LANDMARKS_PATH)
-else:
-    logger.warning("dlib shape predictor not found. Face alignment disabled.")
 
 MODEL_PATH = MODELS_DIR / "lbph_model.xml"
 LABELS_PATH = MODELS_DIR / "labels.json"
@@ -82,19 +74,6 @@ def collect_dataset_stats() -> Dict[str, int]:
     logger.info(f"Dataset stats collected: {stats}")
     return stats
 
-def align_face(image: np.ndarray, landmarks: dlib.full_object_detection) -> np.ndarray:
-    """Align face based on eye landmarks to improve recognition accuracy."""
-    try:
-        left_eye = np.mean([(landmarks.part(i).x, landmarks.part(i).y) for i in range(36, 42)], axis=0)
-        right_eye = np.mean([(landmarks.part(i).x, landmarks.part(i).y) for i in range(42, 48)], axis=0)
-        delta_x = right_eye[0] - left_eye[0]
-        delta_y = right_eye[1] - left_eye[1]
-        angle = np.degrees(np.arctan2(delta_y, delta_x)) - 180
-        return rotate_image(image, angle)
-    except Exception as e:
-        logger.warning(f"Face alignment failed: {e}")
-        return image
-
 def rotate_image(image: np.ndarray, angle: float) -> np.ndarray:
     try:
         (h, w) = image.shape[:2]
@@ -107,7 +86,7 @@ def rotate_image(image: np.ndarray, angle: float) -> np.ndarray:
         return image
 
 def process_image(img_path: Path, label: int) -> List[Tuple[np.ndarray, int]]:
-    """Process a single image with augmentation and optional face alignment."""
+    """Process a single image with augmentation."""
     try:
         img = cv2.imdecode(np.fromfile(str(img_path), dtype=np.uint8), cv2.IMREAD_COLOR)
         if img is None:
@@ -121,11 +100,6 @@ def process_image(img_path: Path, label: int) -> List[Tuple[np.ndarray, int]]:
             return []
         x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
         roi = gray[y : y + h, x : x + w]
-        
-        if LANDMARK_DETECTOR:
-            dlib_rect = dlib.rectangle(x, y, x + w, y + h)
-            landmarks = LANDMARK_DETECTOR(img, dlib_rect)
-            roi = align_face(roi, landmarks)
         
         roi = cv2.resize(roi, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
         results = [(roi, label), (cv2.flip(roi, 1), label)]
@@ -220,7 +194,7 @@ def sanitize_name(name: str) -> str:
 # ---------- Streamlit UI ----------
 st.set_page_config(page_title=APP_TITLE, page_icon="🎥", layout="wide")
 st.title(APP_TITLE)
-st.caption("Advanced face recognition with face alignment, logging, batch processing, and enhanced evaluation.")
+st.caption("Advanced face recognition with logging, batch processing, and enhanced evaluation.")
 
 with st.sidebar:
     st.header("Controls")
@@ -253,7 +227,7 @@ with tabs[0]:
     st.subheader("Add images for a person")
     person_name = st.text_input("Person name", placeholder="e.g., Abhinav")
     sanitized_name = sanitize_name(person_name) if person_name else ""
-    st.write("Capture from webcam or upload images. Auto-detects faces with alignment for quality.")
+    st.write("Capture from webcam or upload images. Auto-detects faces for quality.")
     st.info("Tips: Good lighting, direct camera facing, centered face. 20+ images per person recommended.")
 
     col1, col2 = st.columns(2)
@@ -280,11 +254,6 @@ with tabs[0]:
                     st.warning("No face detected. Try better lighting or closer camera.")
                     logger.warning("No face detected in webcam capture")
                 else:
-                    if LANDMARK_DETECTOR:
-                        x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
-                        dlib_rect = dlib.rectangle(x, y, x + w, y + h)
-                        landmarks = LANDMARK_DETECTOR(img, dlib_rect)
-                        img = align_face(img, landmarks)
                     file_path = person_dir / f"{uuid.uuid4().hex}.jpg"
                     ok, buf = cv2.imencode(".jpg", img)
                     if ok:
@@ -341,11 +310,6 @@ with tabs[0]:
                 st.warning(f"No face detected in {up.name}. Skipping.")
                 logger.warning(f"No face detected in uploaded image: {up.name}")
                 return None
-            if LANDMARK_DETECTOR:
-                x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
-                dlib_rect = dlib.rectangle(x, y, x + w, y + h)
-                landmarks = LANDMARK_DETECTOR(img, dlib_rect)
-                img = align_face(img, landmarks)
             file_path = person_dir / f"{uuid.uuid4().hex}.jpg"
             ok, buf = cv2.imencode(".jpg", img)
             if ok:
@@ -376,7 +340,7 @@ with tabs[0]:
 # --------- TRAIN TAB ---------
 with tabs[1]:
     st.subheader("Train LBPH model")
-    st.write("Train or retrain the model with augmented data (flips, rotations, and alignment) for better accuracy.")
+    st.write("Train or retrain the model with augmented data (flips, rotations) for better accuracy.")
     if st.button("Train / Retrain"):
         with st.spinner("Training model..."):
             try:
@@ -421,10 +385,6 @@ with tabs[2]:
                             continue
                         x, y, w, h = max(faces, key=lambda rect: rect[2] * rect[3])
                         roi = gray[y : y + h, x : x + w]
-                        if LANDMARK_DETECTOR:
-                            dlib_rect = dlib.rectangle(x, y, x + w, y + h)
-                            landmarks = LANDMARK_DETECTOR(img, dlib_rect)
-                            roi = align_face(roi, landmarks)
                         try:
                             roi = cv2.resize(roi, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
                             all_rois.append(roi)
@@ -495,7 +455,7 @@ with tabs[2]:
 # --------- LIVE RECOGNITION TAB ---------
 with tabs[3]:
     st.subheader("Start live webcam recognition")
-    st.write("Click **Start** below and allow camera access. Optimized with face alignment and FPS display.")
+    st.write("Click **Start** below and allow camera access. Optimized with FPS display.")
 
     recognizer, id_to_name = load_model()
     if recognizer is None or not id_to_name:
@@ -539,10 +499,6 @@ with tabs[3]:
                     for (x, y, w, h) in faces:
                         roi = gray[y : y + h, x : x + w]
                         try:
-                            if LANDMARK_DETECTOR:
-                                dlib_rect = dlib.rectangle(x, y, x + w, y + h)
-                                landmarks = LANDMARK_DETECTOR(img, dlib_rect)
-                                roi = align_face(roi, landmarks)
                             roi = cv2.resize(roi, FACE_RESIZE, interpolation=cv2.INTER_LINEAR)
                             roi = cv2.equalizeHist(roi)
                         except Exception as e:
@@ -598,4 +554,4 @@ with tabs[3]:
         )
 
 st.markdown("---")
-st.caption("Enhancements: Added face alignment with dlib, comprehensive logging, batch processing for uploads, confusion matrix visualization, and improved error handling. For best results, capture 20+ varied images per person.")
+st.caption("Enhancements: Added comprehensive logging, batch processing for uploads, confusion matrix visualization, and improved error handling. For best results, capture 20+ varied images per person.")
