@@ -5,5 +5,4 @@ av
 numpy
 opencv-python
 pandas
-dlib==19.24.2
 matplotlib
