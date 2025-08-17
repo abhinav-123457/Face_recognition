@@ -1,6 +1,7 @@
 opencv-contrib-python-headless
 streamlit
 streamlit-webrtc
+dlib
 
 
 av
