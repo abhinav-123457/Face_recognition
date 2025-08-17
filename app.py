@@ -677,4 +677,4 @@ with tabs[3]:
 
 st.markdown("---")
 st.caption("Enhancements: Added auto-capture feature to automatically take a specified number of photos (minimum 20) for training, with progress display and face detection check. Ensures minimum photos per person before training.")
-```
+
