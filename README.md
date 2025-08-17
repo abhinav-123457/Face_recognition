@@ -1,4 +1,4 @@
-# Live Face Recognition on Streamlit (WebRTC + OpenCV LBPH)
+# Enhanced Live Face Recognition (Streamlit + WebRTC, OpenCV LBPH)
 
 This app lets you enroll faces, train an LBPH model (OpenCV), and run **LIVE** face recognition in the browser using your webcam.
 
