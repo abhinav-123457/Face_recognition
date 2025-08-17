@@ -3,6 +3,6 @@ streamlit-webrtc
 opencv-contrib-python-headless
 av
 numpy
-
+opencv-python
 pandas
 matplotlib
