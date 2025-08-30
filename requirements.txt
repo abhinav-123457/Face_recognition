@@ -1,6 +1,4 @@
 opencv-contrib-python-headless
-opencv-python-headless
-opencv-python
 streamlit
 streamlit-webrtc
 imgaug
