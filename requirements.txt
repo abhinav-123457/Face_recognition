@@ -1,7 +1,7 @@
 numpy
-opencv-contrib-python-headless==4.5.5.64
+opencv-contrib-python-headless
 
-av==9.2.0
+av
 streamlit
 streamlit-webrtc
 imgaug
